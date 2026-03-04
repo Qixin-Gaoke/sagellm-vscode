@@ -77,6 +77,20 @@ export class ChatPanel {
     this.history = [{ role: "system", content: systemPrompt }];
 
     const healthy = await checkHealth();
+
+    // Auto-restore model: if gateway is healthy but no model selected yet,
+    // fetch from gateway and pick the first available one
+    if (healthy && !this.modelManager.currentModel) {
+      try {
+        const models = await this.modelManager.refresh();
+        if (models.length > 0) {
+          await this.modelManager.setModel(models[0].id);
+        }
+      } catch {
+        // non-fatal
+      }
+    }
+
     this.panel.webview.postMessage({
       type: "init",
       gatewayConnected: healthy,

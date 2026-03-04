@@ -196,8 +196,12 @@ export async function activate(
     const savedModel = cfg.get<string>("preloadModel", "").trim();
     const savedBackend = cfg.get<string>("backend", "").trim();
     if (savedModel && savedBackend) {
-      // Silent auto-start: model + backend already configured
-      startGateway(statusBar);
+      // Check if gateway is already up before starting another instance
+      checkHealth().then((alreadyRunning) => {
+        if (!alreadyRunning) {
+          startGateway(statusBar);
+        }
+      });
     } else {
       // First time or not yet configured: show picker after short delay
       setTimeout(() => promptAndStartServer(context, statusBar), 1500);
@@ -225,9 +229,17 @@ export async function activate(
     const healthy = await checkHealth();
     statusBar?.setGatewayStatus(healthy);
     if (healthy) {
-      await modelManager.refresh().catch(() => {});
-      modelsProvider.refresh();
-      statusBar?.setModel(modelManager.currentModel);
+      try {
+        const models = await modelManager.refresh();
+        modelsProvider.refresh();
+        // Auto-restore: if no model selected but gateway has models, pick the first one
+        if (!modelManager.currentModel && models.length > 0) {
+          await modelManager.setModel(models[0].id);
+        }
+        statusBar?.setModel(modelManager.currentModel);
+      } catch {
+        // gateway healthy but model fetch failed — non-fatal
+      }
     } else {
       const choice = await vscode.window.showWarningMessage(
         "SageLLM: Gateway not reachable. Configure and start now?",
