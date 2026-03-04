@@ -2,7 +2,7 @@
   "name": "sagellm-vscode",
   "displayName": "SageLLM",
   "description": "SageLLM inference engine integration for VS Code — chat, code completion, and model management via sagellm-gateway",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "publisher": "intellistream",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -165,7 +165,12 @@
         "sagellm.backend": {
           "type": "string",
           "default": "",
-          "enum": ["", "cpu", "cuda", "ascend"],
+          "enum": [
+            "",
+            "cpu",
+            "cuda",
+            "ascend"
+          ],
           "enumDescriptions": [
             "Auto-detect (will be prompted on first launch)",
             "CPU inference",
