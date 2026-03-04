@@ -4,7 +4,10 @@
  */
 import * as vscode from "vscode";
 import * as cp from "child_process";
-import { checkHealth } from "./gatewayClient";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
+import { checkHealth, fetchModels } from "./gatewayClient";
 import { StatusBarManager } from "./statusBar";
 
 export interface BackendInfo {
@@ -45,6 +48,106 @@ export function detectBackends(infoOutput: string): BackendInfo[] {
   }
 
   return backends;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Model discovery
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ModelSource {
+  id: string;
+  label: string;
+  description: string;
+  detail: string; // the actual model ID to pass to sagellm
+}
+
+/** Scan ~/.cache/huggingface/hub/ for downloaded models. */
+export function discoverHuggingFaceModels(): ModelSource[] {
+  const hubDir = path.join(os.homedir(), ".cache", "huggingface", "hub");
+  const results: ModelSource[] = [];
+  try {
+    if (!fs.existsSync(hubDir)) return results;
+    for (const entry of fs.readdirSync(hubDir)) {
+      if (!entry.startsWith("models--")) continue;
+      // models--Qwen--Qwen2.5-7B-Instruct  →  Qwen/Qwen2.5-7B-Instruct
+      const modelId = entry.slice("models--".length).replace(/--/g, "/");
+      results.push({
+        id: modelId,
+        label: `$(database) ${modelId}`,
+        description: "local HF cache",
+        detail: modelId,
+      });
+    }
+  } catch {
+    // ignore permission / missing dir errors
+  }
+  return results;
+}
+
+/** Try fetching models from an already-running gateway (non-throwing). */
+export async function tryFetchGatewayModels(): Promise<ModelSource[]> {
+  try {
+    const models = await fetchModels();
+    return models.map((m) => ({
+      id: m.id,
+      label: `$(server) ${m.id}`,
+      description: "running gateway",
+      detail: m.id,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Build the full model list for the picker:
+ *   1. Gateway models (if server already running)
+ *   2. Local HuggingFace cache
+ *   3. Recent history (deduped)
+ *   4. "Enter manually…" fallback
+ */
+export async function buildModelPickerItems(
+  recentModels: string[],
+  savedModel: string
+): Promise<vscode.QuickPickItem[]> {
+  const [gatewayModels, hfModels] = await Promise.all([
+    tryFetchGatewayModels(),
+    Promise.resolve(discoverHuggingFaceModels()),
+  ]);
+
+  const seen = new Set<string>();
+  const items: vscode.QuickPickItem[] = [];
+
+  // Helper to push if not already seen
+  const push = (src: ModelSource) => {
+    if (seen.has(src.detail)) return;
+    seen.add(src.detail);
+    items.push({ label: src.label, description: src.description, detail: src.detail });
+  };
+
+  // Pin saved model first
+  if (savedModel) {
+    items.push({
+      label: `$(star-full) ${savedModel}`,
+      description: "last used",
+      detail: savedModel,
+    });
+    seen.add(savedModel);
+  }
+
+  gatewayModels.forEach(push);
+
+  // Recent history
+  for (const m of recentModels) {
+    if (!seen.has(m)) {
+      push({ id: m, label: `$(history) ${m}`, description: "recent", detail: m });
+    }
+  }
+
+  hfModels.forEach(push);
+
+  items.push({ label: "$(edit) Enter model path / HuggingFace ID…", description: "", detail: "__custom__" });
+  return items;
 }
 
 /** Run `sagellm info` and return detected backends. */
@@ -103,17 +206,17 @@ export async function promptAndStartServer(
   const recentModels: string[] = context.globalState.get<string[]>("sagellm.recentModels", []);
   const savedModel = cfg.get<string>("preloadModel", "").trim();
 
-  const modelItems: vscode.QuickPickItem[] = [
-    ...(savedModel ? [{ label: `$(star) ${savedModel}`, description: "last used", detail: savedModel }] : []),
-    ...recentModels
-      .filter((m) => m !== savedModel)
-      .map((m) => ({ label: `$(history) ${m}`, description: "recent", detail: m })),
-    { label: "$(edit) Enter model path / HuggingFace ID…", description: "", detail: "__custom__" },
-  ];
+  // Build list asynchronously (gateway probe + local HF scan run in parallel)
+  const modelItems = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: "SageLLM: Scanning available models…", cancellable: false },
+    () => buildModelPickerItems(recentModels, savedModel)
+  );
 
   const pickedModel = await vscode.window.showQuickPick(modelItems, {
-    title: "SageLLM: Select Model",
-    placeHolder: "Pick a recent model or enter a new one",
+    title: `SageLLM: Select Model  (${modelItems.length - 1} found)`,
+    placeHolder: "Pick a model or enter a custom path / HuggingFace ID",
+    matchOnDescription: true,
+    matchOnDetail: false,
   }) as vscode.QuickPickItem | undefined;
   if (!pickedModel) {
     sb?.setGatewayStatus(false);
