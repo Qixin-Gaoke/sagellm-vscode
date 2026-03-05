@@ -5,8 +5,13 @@ import { ChatPanel, ChatViewProvider } from "./chatPanel";
 import { SageLLMInlineCompletionProvider } from "./inlineCompletion";
 import { StatusBarManager } from "./statusBar";
 import { checkHealth, GatewayConnectionError } from "./gatewayClient";
-import { promptAndStartServer } from "./serverLauncher";
+import { promptAndStartServer, MODEL_CATALOG } from "./serverLauncher";
 import { DEFAULT_GATEWAY_PORT } from "./sagePorts";
+import {
+  checkPackagesIfDue,
+  runFullDiagnostics,
+  showDiagnosticsPanel,
+} from "./diagnostics";
 
 let gatewayProcess: cp.ChildProcess | null = null;
 let statusBar: StatusBarManager | null = null;
@@ -195,6 +200,22 @@ export async function activate(
       );
     }),
 
+    vscode.commands.registerCommand("sagellm.runDiagnostics", async () => {
+      let result;
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: "SageLLM: 正在检测环境…",
+          cancellable: false,
+        },
+        async () => {
+          const modelIds = MODEL_CATALOG.map((m) => m.id);
+          result = await runFullDiagnostics(modelIds);
+        }
+      );
+      if (result) await showDiagnosticsPanel(result);
+    }),
+
     vscode.commands.registerCommand("sagellm.checkConnection", async () => {
       statusBar?.setConnecting();
       const healthy = await checkHealth();
@@ -329,6 +350,10 @@ export async function activate(
     }, delay);
   }
   scheduleRetryConnect();
+
+  // ── Background package version check (throttled to once per day) ──────────
+  // 90s delay so it doesn't run during the critical startup path
+  setTimeout(() => checkPackagesIfDue(context), 90_000);
 }
 
 export function deactivate(): void {
@@ -388,9 +413,17 @@ function startGateway(sb: StatusBarManager | null): void {
     } else if (attempts >= maxAttempts) {
       clearInterval(poll);
       sb?.setError("Gateway start timed out");
-      vscode.window.showWarningMessage(
-        "SageLLM: Gateway did not respond within 5 minutes. Check the terminal for errors."
-      );
+      vscode.window
+        .showWarningMessage(
+          "SageLLM: Gateway 5 分钟内未响应，请检查终端输出。",
+          "运行诊断",
+          "查看终端"
+        )
+        .then((choice) => {
+          if (choice === "运行诊断") {
+            vscode.commands.executeCommand("sagellm.runDiagnostics");
+          }
+        });
     } else if (attempts % 20 === 0) {
       // Show elapsed time every minute so user knows it's still loading
       const elapsed = Math.round(attempts * 3 / 60);

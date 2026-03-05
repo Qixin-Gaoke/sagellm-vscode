@@ -10,6 +10,7 @@ import * as os from "os";
 import { checkHealth, fetchModels } from "./gatewayClient";
 import { StatusBarManager } from "./statusBar";
 import { DEFAULT_GATEWAY_PORT } from "./sagePorts";
+import { isModelDownloadCorrupt, offerRepairIfCorrupt } from "./diagnostics";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Model catalog
@@ -252,7 +253,12 @@ export async function buildModelPickerItems(
   const downloadedItems: vscode.QuickPickItem[] = [];
   const addDownloaded = (id: string, desc: string) => {
     if (seen.has(id)) return; seen.add(id);
-    downloadedItems.push({ label: `$(database) ${id}`, description: `✅ ${desc}`, detail: id });
+    const corrupt = isModelDownloadCorrupt(id);
+    downloadedItems.push({
+      label: corrupt ? `$(warning) ${id}` : `$(database) ${id}`,
+      description: corrupt ? `⚠️ 下载损坏，选择后可修复 — ${desc}` : `✅ ${desc}`,
+      detail: id,
+    });
   };
   downloadedCatalog.forEach((m) => addDownloaded(m.id, `${m.size} · ${m.vram} · ${m.desc}`));
   recentDownloaded.forEach((id) => addDownloaded(id, "recent"));
@@ -363,18 +369,25 @@ export async function promptAndStartServer(
     modelId = modelId.trim();
   }
 
-  // ── 3. Download if not cached ─────────────────────────────────────────────
-  if (!isModelDownloaded(modelId) && !modelId.startsWith("/")) {
-    const choice = await vscode.window.showInformationMessage(
-      `"${modelId}" 尚未下载。是否现在下载？`,
-      { modal: true },
-      "下载", "取消"
-    );
-    if (choice !== "下载") { sb?.setGatewayStatus(false); return; }
+  // ── 3. Check cache integrity / download if not cached ────────────────────
+  if (!modelId.startsWith("/")) {
+    if (isModelDownloaded(modelId)) {
+      // Model is cached — verify no shards are still .incomplete from a
+      // previously-interrupted download (would cause a load-time crash).
+      const repairOk = await offerRepairIfCorrupt(modelId);
+      if (!repairOk) { sb?.setGatewayStatus(false); return; }
+    } else {
+      const choice = await vscode.window.showInformationMessage(
+        `"${modelId}" 尚未下载。是否现在下载？`,
+        { modal: true },
+        "下载", "取消"
+      );
+      if (choice !== "下载") { sb?.setGatewayStatus(false); return; }
 
-    const ok = await downloadModel(modelId);
-    if (!ok) { sb?.setGatewayStatus(false); return; }
-    vscode.window.showInformationMessage(`✅ ${modelId} 下载完成`);
+      const ok = await downloadModel(modelId);
+      if (!ok) { sb?.setGatewayStatus(false); return; }
+      vscode.window.showInformationMessage(`✅ ${modelId} 下载完成`);
+    }
   }
 
   // ── 4. Persist choices ────────────────────────────────────────────────────
@@ -412,7 +425,17 @@ export async function promptAndStartServer(
     } else if (attempts >= maxPollAttempts) {
       clearInterval(poll);
       sb?.setError("Server start timed out");
-      vscode.window.showWarningMessage("SageLLM: Server did not respond within 5 minutes. Check the terminal.");
+      vscode.window
+        .showWarningMessage(
+          "SageLLM: Server 5 分钟内未响应。",
+          "运行诊断",
+          "查看终端"
+        )
+        .then((choice) => {
+          if (choice === "运行诊断") {
+            vscode.commands.executeCommand("sagellm.runDiagnostics");
+          }
+        });
     } else if (attempts % 20 === 0) {
       // Notify user every minute so they know it's still loading
       const elapsed = Math.round(attempts * 3 / 60);
