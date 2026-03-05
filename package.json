@@ -2,7 +2,7 @@
   "name": "sagellm-vscode",
   "displayName": "SageLLM",
   "description": "SageLLM inference engine integration for VS Code — chat, code completion, and model management via sagellm-gateway",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "publisher": "intellistream",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -185,6 +185,34 @@
         "sagellm.model": {
           "type": "string",
           "default": "",
+          "enum": [
+            "",
+            "Qwen/Qwen2.5-0.5B-Instruct",
+            "Qwen/Qwen2.5-Coder-0.5B-Instruct",
+            "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            "Qwen/Qwen2.5-1.5B-Instruct",
+            "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+            "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+            "Qwen/Qwen2.5-3B-Instruct",
+            "Qwen/Qwen2.5-Coder-3B-Instruct",
+            "Qwen/Qwen2.5-7B-Instruct",
+            "Qwen/Qwen2.5-Coder-7B-Instruct",
+            "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+          ],
+          "enumDescriptions": [
+            "Auto — prompt on first use",
+            "Qwen2.5 0.5B Chat · ~1 GB VRAM · CPU-ok",
+            "Qwen2.5 Coder 0.5B · ~1 GB VRAM · CPU-ok",
+            "TinyLlama 1.1B Chat · ~2 GB VRAM · CPU-ok",
+            "Qwen2.5 1.5B Chat · ~3 GB VRAM",
+            "Qwen2.5 Coder 1.5B · ~3 GB VRAM",
+            "DeepSeek-R1-Distill 1.5B · ~3 GB VRAM · strong reasoning",
+            "Qwen2.5 3B Chat · ~6 GB VRAM",
+            "Qwen2.5 Coder 3B · ~6 GB VRAM",
+            "Qwen2.5 7B Chat · ~14 GB VRAM · needs GPU",
+            "Qwen2.5 Coder 7B · ~14 GB VRAM · needs GPU",
+            "DeepSeek-R1-Distill 7B · ~14 GB VRAM · needs GPU"
+          ],
           "description": "Default model to use (leave empty to be prompted on first use)"
         },
         "sagellm.autoStartGateway": {
@@ -200,6 +228,34 @@
         "sagellm.preloadModel": {
           "type": "string",
           "default": "",
+          "enum": [
+            "",
+            "Qwen/Qwen2.5-0.5B-Instruct",
+            "Qwen/Qwen2.5-Coder-0.5B-Instruct",
+            "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            "Qwen/Qwen2.5-1.5B-Instruct",
+            "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+            "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+            "Qwen/Qwen2.5-3B-Instruct",
+            "Qwen/Qwen2.5-Coder-3B-Instruct",
+            "Qwen/Qwen2.5-7B-Instruct",
+            "Qwen/Qwen2.5-Coder-7B-Instruct",
+            "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+          ],
+          "enumDescriptions": [
+            "Auto — prompt on first launch",
+            "Qwen2.5 0.5B Chat · ~1 GB VRAM · CPU-ok",
+            "Qwen2.5 Coder 0.5B · ~1 GB VRAM · CPU-ok",
+            "TinyLlama 1.1B Chat · ~2 GB VRAM · CPU-ok",
+            "Qwen2.5 1.5B Chat · ~3 GB VRAM",
+            "Qwen2.5 Coder 1.5B · ~3 GB VRAM",
+            "DeepSeek-R1-Distill 1.5B · ~3 GB VRAM · strong reasoning",
+            "Qwen2.5 3B Chat · ~6 GB VRAM",
+            "Qwen2.5 Coder 3B · ~6 GB VRAM",
+            "Qwen2.5 7B Chat · ~14 GB VRAM · needs GPU",
+            "Qwen2.5 Coder 7B · ~14 GB VRAM · needs GPU",
+            "DeepSeek-R1-Distill 7B · ~14 GB VRAM · needs GPU"
+          ],
           "description": "Model to pre-load on startup (appended as --model <value>). Leave empty to pick on first launch."
         },
         "sagellm.backend": {
