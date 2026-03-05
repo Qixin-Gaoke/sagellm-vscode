@@ -159,7 +159,7 @@ export async function downloadModel(modelId: string): Promise<boolean> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Backend detection
+// Backend detection  —  direct hardware queries (not parsing `sagellm info`)
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface BackendInfo {
@@ -169,26 +169,82 @@ export interface BackendInfo {
   description: string;
 }
 
-export function detectBackends(infoOutput: string): BackendInfo[] {
-  const backends: BackendInfo[] = [
-    { id: "cpu", label: "$(circuit-board) CPU", detected: true, description: "Always available" },
-  ];
-  const hasCuda   = /CUDA.*✅|✅.*CUDA|✅.*\d+\s*device/i.test(infoOutput);
-  const hasAscend = /Ascend.*✅|✅.*Ascend|✅.*torch_npu/i.test(infoOutput);
-  const cudaMatch = infoOutput.match(/CUDA[^\n]*✅[^\n]*?-\s*(.+)|✅\s*\d+\s*device[^-]*-\s*(.+)/i);
-  const cudaName  = cudaMatch ? (cudaMatch[1] || cudaMatch[2] || "").trim().split("\n")[0] : "";
-  if (hasCuda)   backends.push({ id: "cuda",   label: "$(zap) CUDA (GPU)",          detected: true, description: cudaName || "NVIDIA GPU detected" });
-  if (hasAscend) backends.push({ id: "ascend", label: "$(hubot) Ascend (昇腾 NPU)", detected: true, description: "Ascend NPU detected" });
-  return backends;
+/** Run a shell command and return trimmed stdout, or "" on error/timeout. */
+function execQuick(cmd: string, timeoutMs = 6000): Promise<string> {
+  return new Promise((resolve) => {
+    cp.exec(cmd, { timeout: timeoutMs }, (_err, stdout) =>
+      resolve((stdout ?? "").trim())
+    );
+  });
 }
 
+/**
+ * Probe for CUDA via nvidia-smi (fastest, no Python needed).
+ * Returns a human-readable GPU name string, or "" if no CUDA GPU found.
+ */
+async function detectCuda(): Promise<string> {
+  // nvidia-smi: one GPU name per line
+  const names = await execQuick(
+    "nvidia-smi --query-gpu=name --format=csv,noheader,nounits 2>/dev/null"
+  );
+  if (names) {
+    const first = names.split("\n")[0].trim();
+    const count = names.split("\n").filter(Boolean).length;
+    return count > 1 ? `${first} (+${count - 1} more)` : first;
+  }
+  return "";
+}
+
+/**
+ * Probe for Ascend NPU via torch_npu.
+ * Returns a device description string, or "" if not present.
+ */
+async function detectAscend(): Promise<string> {
+  const out = await execQuick(
+    `python -c "import torch_npu; n=torch_npu.npu.device_count(); print(f'{n} NPU(s)')" 2>/dev/null`,
+    8000
+  );
+  return out.match(/^\d+\s*NPU/i) ? out : "";
+}
+
+/**
+ * Detect all available backends by querying hardware directly.
+ * CPU is always present.  CUDA and Ascend are detected in parallel.
+ *
+ * This replaces the previous approach of parsing `sagellm info` text output,
+ * which was unreliable because Rich adds box-drawing chars / ANSI codes.
+ */
 export async function detectBackendsFromCLI(): Promise<BackendInfo[]> {
-  return new Promise((resolve) => {
-    cp.exec("sagellm info", { timeout: 15000 }, (_err, stdout) => {
-      try { resolve(detectBackends(stdout ?? "")); }
-      catch { resolve([{ id: "cpu", label: "$(circuit-board) CPU", detected: true, description: "Always available" }]); }
+  const [cudaDesc, ascendDesc] = await Promise.all([
+    detectCuda(),
+    detectAscend(),
+  ]);
+
+  const backends: BackendInfo[] = [
+    {
+      id: "cpu",
+      label: "$(circuit-board) CPU",
+      detected: true,
+      description: "Always available",
+    },
+  ];
+  if (cudaDesc) {
+    backends.push({
+      id: "cuda",
+      label: "$(zap) CUDA (GPU)",
+      detected: true,
+      description: cudaDesc,
     });
-  });
+  }
+  if (ascendDesc) {
+    backends.push({
+      id: "ascend",
+      label: "$(hubot) Ascend (昇腾 NPU)",
+      detected: true,
+      description: ascendDesc,
+    });
+  }
+  return backends;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -316,28 +372,55 @@ export async function promptAndStartServer(
 
   // ── 1. Detect backends ────────────────────────────────────────────────────
   sb?.setConnecting();
-  const backends     = await detectBackendsFromCLI();
-  const backendItems = backends.map((b) => ({
-    label: b.label,
-    description: b.detected ? `✅ ${b.description}` : b.description,
-    detail: b.id,
-  }));
+  const backends = await detectBackendsFromCLI();
 
   const savedBackend = cfg.get<string>("backend", "");
-  if (savedBackend) {
-    const idx = backendItems.findIndex((i) => i.detail === savedBackend);
-    if (idx > 0) backendItems.unshift(...backendItems.splice(idx, 1));
-  } else {
-    backendItems.reverse(); // prefer GPU
+
+  // If the saved backend is no longer detected (e.g. GPU driver removed),
+  // warn the user so they don't silently downgrade to CPU.
+  if (
+    savedBackend &&
+    savedBackend !== "cpu" &&
+    !backends.some((b) => b.id === savedBackend)
+  ) {
+    vscode.window.showWarningMessage(
+      `SageLLM: 上次使用的 "${savedBackend}" 后端未检测到，请重新选择。`
+    );
   }
 
-  const pickedBackend = await vscode.window.showQuickPick(backendItems, {
-    title: "SageLLM: Select Inference Backend",
-    placeHolder: "Choose hardware backend to use",
-  }) as vscode.QuickPickItem | undefined;
-  if (!pickedBackend) { sb?.setGatewayStatus(false); return; }
-  const backendId = pickedBackend.detail!;
-  await cfg.update("backend", backendId, vscode.ConfigurationTarget.Global);
+  // If only CPU is available, skip the picker — nothing to choose.
+  let backendId: string;
+  if (backends.length === 1) {
+    backendId = "cpu";
+    await cfg.update("backend", "cpu", vscode.ConfigurationTarget.Global);
+  } else {
+    const backendItems = backends.map((b) => {
+      const isSaved = b.id === savedBackend;
+      return {
+        label: isSaved ? `$(star-full) ${b.label}` : b.label,
+        description: `${isSaved ? "上次使用  " : ""}${b.description}`,
+        detail: b.id,
+      };
+    });
+    // Pre-sort: saved backend first, then by preference (GPU > CPU)
+    const savedIdx = backendItems.findIndex((i) => i.detail === savedBackend);
+    if (savedIdx > 0) {
+      backendItems.unshift(...backendItems.splice(savedIdx, 1));
+    } else if (!savedBackend) {
+      backendItems.reverse(); // prefer GPU when nothing saved
+    }
+
+    const pickedBackend = (await vscode.window.showQuickPick(backendItems, {
+      title: "SageLLM: 选择推理后端",
+      placeHolder: "$(star-full) 上次使用  · $(zap) GPU  · $(circuit-board) CPU",
+    })) as vscode.QuickPickItem | undefined;
+    if (!pickedBackend) {
+      sb?.setGatewayStatus(false);
+      return;
+    }
+    backendId = pickedBackend.detail!;
+    await cfg.update("backend", backendId, vscode.ConfigurationTarget.Global);
+  }
 
   // ── 2. Pick model ─────────────────────────────────────────────────────────
   const recentModels = context.globalState.get<string[]>("sagellm.recentModels", []);
