@@ -169,7 +169,7 @@
         "sagellm.gateway.port": {
           "type": "number",
           "default": 8901,
-          "description": "Port for sagellm-gateway / sagellm serve (default: 8901)"
+          "description": "Port for sagellm-gateway / sagellm serve. Mirrors SagePorts.SAGELLM_SERVE_PORT (8901) from sage-common. Use 8889 for a standalone sagellm-gateway process (SagePorts.SAGELLM_GATEWAY)."
         },
         "sagellm.gateway.apiKey": {
           "type": "string",

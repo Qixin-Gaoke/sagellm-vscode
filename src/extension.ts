@@ -6,6 +6,7 @@ import { SageLLMInlineCompletionProvider } from "./inlineCompletion";
 import { StatusBarManager } from "./statusBar";
 import { checkHealth, GatewayConnectionError } from "./gatewayClient";
 import { promptAndStartServer } from "./serverLauncher";
+import { DEFAULT_GATEWAY_PORT } from "./sagePorts";
 
 let gatewayProcess: cp.ChildProcess | null = null;
 let statusBar: StatusBarManager | null = null;
@@ -169,7 +170,7 @@ export async function activate(
       } else {
         const cfg = vscode.workspace.getConfiguration("sagellm");
         const host = cfg.get("gateway.host", "localhost");
-        const port = cfg.get("gateway.port", 8000);
+        const port = cfg.get("gateway.port", DEFAULT_GATEWAY_PORT);
         const choice = await vscode.window.showWarningMessage(
           `SageLLM: Cannot reach gateway at ${host}:${port}`,
           "Start Gateway",
@@ -284,7 +285,7 @@ export function deactivate(): void {
 function startGateway(sb: StatusBarManager | null): void {
   const cfg = vscode.workspace.getConfiguration("sagellm");
   const baseCmd = cfg.get<string>("gatewayStartCommand", "sagellm serve");
-  const port = cfg.get<number>("gateway.port", 8901);
+  const port = cfg.get<number>("gateway.port", DEFAULT_GATEWAY_PORT);
   const preloadModel = cfg.get<string>("preloadModel", "").trim();
   const backend = cfg.get<string>("backend", "").trim();
 

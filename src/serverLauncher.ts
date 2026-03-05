@@ -9,6 +9,7 @@ import * as path from "path";
 import * as os from "os";
 import { checkHealth, fetchModels } from "./gatewayClient";
 import { StatusBarManager } from "./statusBar";
+import { DEFAULT_GATEWAY_PORT } from "./sagePorts";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Model catalog
@@ -305,7 +306,7 @@ export async function promptAndStartServer(
   sb: StatusBarManager | null
 ): Promise<void> {
   const cfg  = vscode.workspace.getConfiguration("sagellm");
-  const port = cfg.get<number>("gateway.port", 8901);
+  const port = cfg.get<number>("gateway.port", DEFAULT_GATEWAY_PORT);
 
   // ── 1. Detect backends ────────────────────────────────────────────────────
   sb?.setConnecting();
