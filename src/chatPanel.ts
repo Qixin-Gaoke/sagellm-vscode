@@ -1,10 +1,146 @@
 import * as vscode from "vscode";
 import {
   streamChatCompletion,
+  chatCompletionFull,
   ChatMessage,
   checkHealth,
 } from "./gatewayClient";
 import { ModelManager } from "./modelManager";
+import {
+  WORKSPACE_TOOLS,
+  executeTool,
+  buildActiveFileContext,
+  resolveAtMentions,
+} from "./workspaceContext";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared tool-calling loop (used by both ChatPanel and ChatViewProvider)
+// ─────────────────────────────────────────────────────────────────────────────
+
+type PostMessage = (msg: Record<string, unknown>) => void;
+
+/**
+ * Run the full agentic chat:  user message → [tool calls] → final streaming answer.
+ *
+ * 1. Resolves @file mentions in the user text.
+ * 2. Optionally injects the active editor's file content into context.
+ * 3. Runs a tool-calling loop (up to MAX_TOOL_ROUNDS rounds) if the model
+ *    wants to explore files.
+ * 4. Streams the final answer back.
+ *
+ * @returns full assistant response text (for history), or "" on abort/error.
+ */
+async function runAgenticChat(
+  userText: string,
+  history: ChatMessage[],
+  model: string,
+  postMsg: PostMessage,
+  abortSignal: AbortSignal,
+  options: { maxTokens: number; temperature: number; useContext: boolean }
+): Promise<string> {
+  // 1. Resolve @file:path mentions
+  const { resolved, mentions } = await resolveAtMentions(userText);
+  if (mentions.length) {
+    postMsg({ type: "toolNote", text: `📎 Attached: ${mentions.join(", ")}` });
+  }
+
+  // 2. Inject active file context into user message if enabled
+  let userContent = resolved;
+  if (options.useContext) {
+    const fileCtx = buildActiveFileContext();
+    if (fileCtx) {
+      userContent = resolved + fileCtx;
+    }
+  }
+
+  history.push({ role: "user", content: userContent });
+
+  // 3. Tool-calling loop
+  const MAX_ROUNDS = 5;
+  for (let round = 0; round < MAX_ROUNDS; round++) {
+    if (abortSignal.aborted) break;
+
+    let finishReason: string;
+    let assistantMsg: ChatMessage;
+
+    try {
+      const result = await chatCompletionFull({
+        model,
+        messages: history,
+        max_tokens: options.maxTokens,
+        temperature: options.temperature,
+        tools: WORKSPACE_TOOLS,
+        tool_choice: "auto",
+      });
+      finishReason  = result.finishReason;
+      assistantMsg  = result.message;
+    } catch {
+      // If tool-calling returns an error (model doesn't support tools),
+      // fall back to plain streaming without tools.
+      break;
+    }
+
+    if (finishReason === "tool_calls" && assistantMsg.tool_calls?.length) {
+      history.push(assistantMsg);
+
+      for (const tc of assistantMsg.tool_calls) {
+        if (abortSignal.aborted) break;
+
+        let args: Record<string, unknown> = {};
+        try { args = JSON.parse(tc.function.arguments); } catch { /* ignore */ }
+
+        postMsg({ type: "toolCall", tool: tc.function.name, args: tc.function.arguments });
+
+        const result = await executeTool(tc.function.name, args);
+
+        history.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          name: tc.function.name,
+          content: result,
+        });
+      }
+      // Continue loop so LLM can process tool results
+      continue;
+    }
+
+    // finish_reason === "stop" → we have the final answer.
+    // If the model returned content directly (non-streaming path), emit it.
+    if (assistantMsg.content) {
+      postMsg({ type: "assistantStart" });
+      // Simulate streaming: break into small chunks so it feels smooth
+      const chunks = assistantMsg.content.match(/.{1,40}/gs) ?? [assistantMsg.content];
+      for (const chunk of chunks) {
+        if (abortSignal.aborted) break;
+        postMsg({ type: "assistantDelta", text: chunk });
+      }
+      postMsg({ type: "assistantEnd" });
+      history.push({ role: "assistant", content: assistantMsg.content });
+      return assistantMsg.content;
+    }
+    break;
+  }
+
+  // Fallback: stream via the normal path (no tools — model may not support them,
+  // or we ran out of tool rounds)
+  postMsg({ type: "assistantStart" });
+  let fullResponse = "";
+  try {
+    fullResponse = await streamChatCompletion(
+      { model, messages: history, max_tokens: options.maxTokens, temperature: options.temperature },
+      (delta) => postMsg({ type: "assistantDelta", text: delta }),
+      abortSignal
+    );
+    history.push({ role: "assistant", content: fullResponse });
+    postMsg({ type: "assistantEnd" });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    postMsg({ type: "error", text: msg });
+    history.pop(); // remove the user message we added above
+  }
+  return fullResponse;
+}
+
 
 export class ChatPanel {
   public static currentPanel: ChatPanel | undefined;
@@ -221,9 +357,7 @@ export class ChatPanel {
   }
 
   private async handleChatMessage(userText: string): Promise<void> {
-    if (!userText.trim()) {
-      return;
-    }
+    if (!userText.trim()) return;
 
     let model = this.modelManager.currentModel;
     if (!model) {
@@ -238,32 +372,20 @@ export class ChatPanel {
     }
 
     const cfg = vscode.workspace.getConfiguration("sagellm");
-    const maxTokens = cfg.get<number>("chat.maxTokens", 2048);
+    const maxTokens   = cfg.get<number>("chat.maxTokens", 2048);
     const temperature = cfg.get<number>("chat.temperature", 0.7);
+    const useContext  = cfg.get<boolean>("chat.workspaceContext", true);
 
-    this.history.push({ role: "user", content: userText });
     this.panel.webview.postMessage({ type: "userMessage", text: userText });
-    this.panel.webview.postMessage({ type: "assistantStart" });
-
     this.abortController = new AbortController();
 
     try {
-      const fullResponse = await streamChatCompletion(
-        { model, messages: this.history, max_tokens: maxTokens, temperature },
-        (delta) => {
-          this.panel.webview.postMessage({ type: "assistantDelta", text: delta });
-        },
-        this.abortController.signal
+      await runAgenticChat(
+        userText, this.history, model,
+        (msg) => this.panel.webview.postMessage(msg),
+        this.abortController.signal,
+        { maxTokens, temperature, useContext }
       );
-
-      this.history.push({ role: "assistant", content: fullResponse });
-      this.panel.webview.postMessage({ type: "assistantEnd" });
-    } catch (err) {
-      const errMsg =
-        err instanceof Error ? err.message : "Unknown error occurred";
-      this.panel.webview.postMessage({ type: "error", text: errMsg });
-      // Remove the user message from history if send failed
-      this.history.pop();
     } finally {
       this.abortController = null;
     }
@@ -440,6 +562,17 @@ export class ChatPanel {
     .not-connected-banner.visible { display: block; }
     .not-connected-banner a { color: var(--vscode-textLink-foreground); cursor: pointer; }
 
+    .tool-call-msg {
+      display: flex; align-items: center; gap: 6px; font-size: 11px;
+      color: var(--vscode-descriptionForeground); padding: 4px 8px;
+      border-left: 2px solid var(--vscode-charts-blue);
+      background: var(--vscode-editor-background);
+      border-radius: 0 4px 4px 0;
+      animation: fadeInTool 0.2s ease;
+    }
+    @keyframes fadeInTool { from { opacity:0; transform:translateX(-4px); } to { opacity:1; transform:none; } }
+    .tool-note-msg { font-size:11px; color:var(--vscode-descriptionForeground); padding:2px 8px; opacity:0.7; }
+
     /* code blocks inside assistant messages */
     .msg-body code {
       background: var(--vscode-textCodeBlock-background);
@@ -491,7 +624,7 @@ export class ChatPanel {
       <button id="send-btn">Send</button>
       <button id="abort-btn">Stop</button>
     </div>
-    <div id="hint">Enter ↵ to send · Shift+Enter for new line · /clear to reset</div>
+    <div id="hint">Enter ↵ to send · Shift+Enter for newline · /clear to reset · @file:path for context</div>
   </div>
 
   <script nonce="${nonce}">
@@ -675,6 +808,25 @@ export class ChatPanel {
           currentAssistantEl = null;
           appendMessage('error', '⚠️ ' + msg.text);
           break;
+
+        case 'toolCall': {
+          const toolDiv = document.createElement('div');
+          toolDiv.className = 'tool-call-msg';
+          let argsStr = '';
+          try { const a = JSON.parse(msg.args || '{}'); argsStr = Object.values(a).slice(0, 2).join(', '); } catch {}
+          toolDiv.textContent = '🔧 ' + msg.tool + (argsStr ? '(' + argsStr + ')' : '');
+          messagesEl.appendChild(toolDiv);
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+          break;
+        }
+        case 'toolNote': {
+          const noteDiv = document.createElement('div');
+          noteDiv.className = 'tool-note-msg';
+          noteDiv.textContent = msg.text;
+          messagesEl.appendChild(noteDiv);
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+          break;
+        }
 
         case 'connectionStatus':
           updateConnectionStatus(msg.connected);
@@ -899,29 +1051,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     const cfg = vscode.workspace.getConfiguration("sagellm");
-    const maxTokens = cfg.get<number>("chat.maxTokens", 2048);
+    const maxTokens   = cfg.get<number>("chat.maxTokens", 2048);
     const temperature = cfg.get<number>("chat.temperature", 0.7);
+    const useContext  = cfg.get<boolean>("chat.workspaceContext", true);
 
-    this.history.push({ role: "user", content: userText });
     this._view.webview.postMessage({ type: "userMessage", text: userText });
-    this._view.webview.postMessage({ type: "assistantStart" });
-
     this.abortController = new AbortController();
 
     try {
-      const fullResponse = await streamChatCompletion(
-        { model, messages: this.history, max_tokens: maxTokens, temperature },
-        (delta) => {
-          this._view?.webview.postMessage({ type: "assistantDelta", text: delta });
-        },
-        this.abortController.signal
+      await runAgenticChat(
+        userText, this.history, model,
+        (msg) => this._view?.webview.postMessage(msg),
+        this.abortController.signal,
+        { maxTokens, temperature, useContext }
       );
-      this.history.push({ role: "assistant", content: fullResponse });
-      this._view.webview.postMessage({ type: "assistantEnd" });
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : "Unknown error occurred";
-      this._view.webview.postMessage({ type: "error", text: errMsg });
-      this.history.pop();
     } finally {
       this.abortController = null;
     }
@@ -994,6 +1137,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     .not-connected-banner { background: var(--vscode-inputValidation-warningBackground); border: 1px solid var(--vscode-inputValidation-warningBorder); border-radius: 6px; padding: 5px 8px; font-size: 11px; display: none; }
     .not-connected-banner.visible { display: block; }
     .not-connected-banner a { color: var(--vscode-textLink-foreground); cursor: pointer; }
+    .tool-call-msg { display:flex; align-items:center; gap:6px; font-size:11px; color:var(--vscode-descriptionForeground); padding:4px 8px; border-left:2px solid var(--vscode-charts-blue); background:var(--vscode-editor-background); border-radius:0 4px 4px 0; animation:fadeInTool 0.2s ease; }
+    @keyframes fadeInTool { from { opacity:0; transform:translateX(-4px); } to { opacity:1; transform:none; } }
+    .tool-note-msg { font-size:11px; color:var(--vscode-descriptionForeground); padding:2px 8px; opacity:0.7; }
     .msg-body code { background: var(--vscode-textCodeBlock-background); padding: 1px 4px; border-radius: 3px; font-family: var(--vscode-editor-font-family); font-size: 0.9em; }
     .msg-body pre { background: var(--vscode-textCodeBlock-background); padding: 6px 10px; border-radius: 6px; overflow-x: auto; margin: 4px 0; }
     .msg-body pre code { background: none; padding: 0; }
@@ -1025,7 +1171,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <button id="send-btn">Send</button>
       <button id="abort-btn">Stop</button>
     </div>
-    <div id="hint">Enter ↵ to send · Shift+Enter for new line</div>
+    <div id="hint">Enter ↵ to send · Shift+Enter for newline · @file:path for context</div>
   </div>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
@@ -1091,6 +1237,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case 'assistantEnd': setStreaming(false); currentAssistantEl = null; break;
         case 'cleared': messagesEl.innerHTML = ''; setStreaming(false); currentAssistantEl = null; const w = document.createElement('div'); w.id = 'welcome'; w.innerHTML = '<div class="big">🤖</div><h2>SageLLM Chat</h2><p>Ask anything</p>'; messagesEl.appendChild(w); break;
         case 'error': setStreaming(false); currentAssistantEl = null; appendMessage('error', '⚠️ ' + msg.text); break;
+        case 'toolCall': { const td = document.createElement('div'); td.className = 'tool-call-msg'; let as = ''; try { const a = JSON.parse(msg.args||'{}'); as = Object.values(a).slice(0,2).join(', '); } catch {} td.textContent = '🔧 ' + msg.tool + (as ? '(' + as + ')' : ''); messagesEl.appendChild(td); messagesEl.scrollTop = messagesEl.scrollHeight; break; }
+        case 'toolNote': { const nd = document.createElement('div'); nd.className = 'tool-note-msg'; nd.textContent = msg.text; messagesEl.appendChild(nd); messagesEl.scrollTop = messagesEl.scrollHeight; break; }
         case 'connectionStatus': updateConnectionStatus(msg.connected); updateModel(msg.model); break;
         case 'modelChanged': updateModel(msg.model); break;
       }

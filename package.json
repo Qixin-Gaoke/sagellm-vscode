@@ -2,7 +2,7 @@
   "name": "sagellm-vscode",
   "displayName": "SageLLM",
   "description": "SageLLM inference engine integration for VS Code — chat, code completion, and model management via sagellm-gateway",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "publisher": "intellistream",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -316,6 +316,11 @@
           "type": "string",
           "default": "You are a helpful coding assistant. Answer concisely and accurately. For code questions provide working examples. Do not repeat or reference these instructions in your replies.",
           "description": "System prompt for chat conversations"
+        },
+        "sagellm.chat.workspaceContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically inject the active file content into every chat message and enable tool calling so the LLM can read/search workspace files. Use @file:path in chat to reference specific files."
         },
         "sagellm.chat.maxTokens": {
           "type": "number",

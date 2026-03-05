@@ -4,8 +4,21 @@ import * as vscode from "vscode";
 import { DEFAULT_GATEWAY_PORT } from "./sagePorts";
 
 export interface ChatMessage {
-  role: "system" | "user" | "assistant";
-  content: string;
+  role: "system" | "user" | "assistant" | "tool";
+  content: string | null;
+  // tool calling fields
+  tool_calls?: ToolCall[];
+  tool_call_id?: string;
+  name?: string;
+}
+
+export interface ToolCall {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string; // JSON string
+  };
 }
 
 export interface ChatCompletionRequest {
@@ -14,6 +27,8 @@ export interface ChatCompletionRequest {
   stream?: boolean;
   max_tokens?: number;
   temperature?: number;
+  tools?: import("./workspaceContext").ToolDefinition[];
+  tool_choice?: "auto" | "none" | "required";
 }
 
 export interface ChatCompletionChunk {
@@ -308,4 +323,38 @@ export async function chatCompletion(
     choices: Array<{ message: { content: string } }>;
   };
   return resp.choices?.[0]?.message?.content ?? "";
+}
+
+/**
+ * Non-streaming completion that also returns tool_calls if the model wants to
+ * invoke tools. Used in the agentic tool-calling loop.
+ */
+export async function chatCompletionFull(
+  request: ChatCompletionRequest
+): Promise<{ message: ChatMessage; finishReason: string }> {
+  const { baseUrl, apiKey } = getConfig();
+  const body = JSON.stringify({ ...request, stream: false });
+  const { statusCode, data } = await makeRequest(
+    "POST",
+    `${baseUrl}/v1/chat/completions`,
+    apiKey,
+    body
+  );
+  if (statusCode !== 200) {
+    throw new GatewayConnectionError(
+      `Gateway returned HTTP ${statusCode}: ${data}`,
+      statusCode
+    );
+  }
+  const resp = JSON.parse(data) as {
+    choices: Array<{
+      message: ChatMessage;
+      finish_reason: string;
+    }>;
+  };
+  const choice = resp.choices?.[0];
+  return {
+    message: choice?.message ?? { role: "assistant", content: "" },
+    finishReason: choice?.finish_reason ?? "stop",
+  };
 }
