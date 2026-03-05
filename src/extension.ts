@@ -260,6 +260,7 @@ export async function activate(
         // Notify any open chat panel so its model badge updates immediately
         if (modelManager.currentModel) {
           ChatPanel.notifyModelChanged(modelManager.currentModel);
+          ChatViewProvider.notifyModelChanged(modelManager.currentModel);
         }
       } catch {
         // gateway healthy but model fetch failed — non-fatal

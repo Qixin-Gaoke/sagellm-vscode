@@ -743,6 +743,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private readonly modelManager: ModelManager
   ) {
     ChatViewProvider._instance = this;
+    // Keep badge in sync whenever model changes externally
+    modelManager.onDidChangeModels(() => {
+      const m = modelManager.currentModel;
+      if (m) {
+        this._view?.webview.postMessage({ type: "modelChanged", model: m });
+      }
+    });
   }
 
   public static notifyModelChanged(model: string): void {
