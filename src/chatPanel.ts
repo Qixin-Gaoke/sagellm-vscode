@@ -175,10 +175,10 @@ export class ChatPanel {
       null, this.disposables
     );
     this.lastActiveEditor = vscode.window.activeTextEditor;
-    // Keep model badge in sync when model changes externally (e.g. sidebar).
+    // Keep model badge AND connection dot in sync when model changes externally.
     modelManager.onDidChangeModels(() => {
       const m = modelManager.currentModel;
-      if (m) this.panel.webview.postMessage({ type: "modelChanged", model: m });
+      if (m) this.panel.webview.postMessage({ type: "connectionStatus", connected: true, model: m });
     });
     // Re-send model info whenever the panel becomes visible (e.g. after reveal).
     this.panel.onDidChangeViewState(
@@ -321,14 +321,12 @@ export class ChatPanel {
 
   /** Update the model badge from outside (e.g. extension.ts restores model). */
   public updateModelBadge(model: string): void {
-    this.panel.webview.postMessage({ type: "modelChanged", model });
+    this.panel.webview.postMessage({ type: "connectionStatus", connected: true, model });
   }
 
   /** Notify the currently open chat panel (if any) of a model change. */
   public static notifyModelChanged(model: string): void {
     ChatPanel.currentPanel?.updateModelBadge(model);
-    // Also update the sidebar view
-    ChatViewProvider.notifyModelChanged(model);
   }
 
   private sendSelectedText(text: string): void {
@@ -1055,18 +1053,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private readonly modelManager: ModelManager
   ) {
     ChatViewProvider._instance = this;
-    // Keep badge in sync whenever model changes externally
+    // Keep badge AND connection dot in sync whenever model changes externally
     modelManager.onDidChangeModels(() => {
       const m = modelManager.currentModel;
       if (m) {
-        this._view?.webview.postMessage({ type: "modelChanged", model: m });
+        this._view?.webview.postMessage({ type: "connectionStatus", connected: true, model: m });
       }
     });
   }
 
   public static notifyModelChanged(model: string): void {
     ChatViewProvider._instance?._view?.webview.postMessage({
-      type: "modelChanged",
+      type: "connectionStatus",
+      connected: true,
       model,
     });
   }
@@ -1172,7 +1171,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   public updateModelBadge(model: string): void {
-    this._view?.webview.postMessage({ type: "modelChanged", model });
+    this._view?.webview.postMessage({ type: "connectionStatus", connected: true, model });
   }
 
   private async _handleMessage(message: { type: string; text?: string; model?: string }): Promise<void> {

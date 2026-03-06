@@ -2069,7 +2069,7 @@ var ChatPanel = class _ChatPanel {
     modelManager.onDidChangeModels(() => {
       const m = modelManager.currentModel;
       if (m)
-        this.panel.webview.postMessage({ type: "modelChanged", model: m });
+        this.panel.webview.postMessage({ type: "connectionStatus", connected: true, model: m });
     });
     this.panel.onDidChangeViewState(
       ({ webviewPanel }) => {
@@ -2191,12 +2191,11 @@ var ChatPanel = class _ChatPanel {
   }
   /** Update the model badge from outside (e.g. extension.ts restores model). */
   updateModelBadge(model) {
-    this.panel.webview.postMessage({ type: "modelChanged", model });
+    this.panel.webview.postMessage({ type: "connectionStatus", connected: true, model });
   }
   /** Notify the currently open chat panel (if any) of a model change. */
   static notifyModelChanged(model) {
     _ChatPanel.currentPanel?.updateModelBadge(model);
-    ChatViewProvider.notifyModelChanged(model);
   }
   sendSelectedText(text) {
     this.panel.webview.postMessage({ type: "insertText", text });
@@ -2903,7 +2902,7 @@ var ChatViewProvider = class _ChatViewProvider {
     modelManager.onDidChangeModels(() => {
       const m = modelManager.currentModel;
       if (m) {
-        this._view?.webview.postMessage({ type: "modelChanged", model: m });
+        this._view?.webview.postMessage({ type: "connectionStatus", connected: true, model: m });
       }
     });
   }
@@ -2915,7 +2914,8 @@ var ChatViewProvider = class _ChatViewProvider {
   lastActiveEditor;
   static notifyModelChanged(model) {
     _ChatViewProvider._instance?._view?.webview.postMessage({
-      type: "modelChanged",
+      type: "connectionStatus",
+      connected: true,
       model
     });
   }
@@ -3007,7 +3007,7 @@ var ChatViewProvider = class _ChatViewProvider {
     }, delaySec * 1e3);
   }
   updateModelBadge(model) {
-    this._view?.webview.postMessage({ type: "modelChanged", model });
+    this._view?.webview.postMessage({ type: "connectionStatus", connected: true, model });
   }
   async _handleMessage(message) {
     switch (message.type) {
