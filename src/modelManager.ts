@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { fetchModels, ModelInfo, GatewayConnectionError } from "./gatewayClient";
-import { MODEL_CATALOG, isModelDownloaded } from "./serverLauncher";
+import { MODEL_CATALOG, isModelDownloaded, downloadModel } from "./serverLauncher";
 
 const SEP = vscode.QuickPickItemKind.Separator;
 
@@ -99,7 +99,7 @@ export class ModelManager {
 
     const picked = await vscode.window.showQuickPick(items, {
       placeHolder: "$(check) active  $(package) local  $(cloud-download) downloadable",
-      title: "SageLLM: Select Model",
+      title: "SageCoder: Select Model",
       matchOnDescription: true,
     });
 
@@ -109,7 +109,7 @@ export class ModelManager {
     if (modelId === "__custom__") {
       modelId =
         (await vscode.window.showInputBox({
-          title: "SageLLM: Model Path or HuggingFace ID",
+          title: "SageCoder: Model Path or HuggingFace ID",
           prompt: "e.g.  Qwen/Qwen2.5-7B-Instruct  or  /models/my-model",
           value: this.selectedModel,
           ignoreFocusOut: true,
@@ -120,8 +120,30 @@ export class ModelManager {
 
     await this.setModel(modelId);
 
-    // If not already loaded in the gateway → offer to restart
+    // If not already loaded in the gateway → check if downloaded first
     if (!loadedIds.has(modelId)) {
+      const inCatalog = MODEL_CATALOG.some((m) => m.id === modelId);
+      const alreadyLocal = !inCatalog || isModelDownloaded(modelId);
+
+      if (!alreadyLocal) {
+        // Model is in the catalog but not yet on disk — offer to download
+        // before (or instead of) restarting the gateway cold.
+        const dlChoice = await vscode.window.showInformationMessage(
+          `「${modelId}」尚未下载到本地。建议先下载，再启动 Gateway。`,
+          "立即下载",
+          "直接启动（引擎内嵌拉取）",
+          "取消"
+        );
+        if (dlChoice === "立即下载") {
+          const ok = await downloadModel(modelId);
+          // If download succeeded, fall through to the restart prompt below.
+          // If it failed / was cancelled, stop here — gateway would fail anyway.
+          if (!ok) return modelId;
+        } else if (dlChoice !== "直接启动（引擎内嵌拉取）") {
+          return undefined; // user pressed Cancel
+        }
+      }
+
       await vscode.workspace
         .getConfiguration("sagellm")
         .update("preloadModel", modelId, vscode.ConfigurationTarget.Global);
@@ -141,7 +163,7 @@ export class ModelManager {
   async setModel(modelId: string): Promise<void> {
     this.selectedModel = modelId;
     await this.context.globalState.update("sagellm.selectedModel", modelId);
-    vscode.workspace
+    await vscode.workspace
       .getConfiguration("sagellm")
       .update("model", modelId, vscode.ConfigurationTarget.Global);
   }

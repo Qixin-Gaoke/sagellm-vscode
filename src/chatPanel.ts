@@ -189,7 +189,7 @@ export class ChatPanel {
 
     const panel = vscode.window.createWebviewPanel(
       ChatPanel.viewType,
-      "SageLLM Chat",
+      "SageCoder Chat",
       column,
       {
         enableScripts: true,
@@ -402,7 +402,7 @@ export class ChatPanel {
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline';" />
-  <title>SageLLM Chat</title>
+  <title>SageCoder Chat</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -597,7 +597,7 @@ export class ChatPanel {
 <body>
   <div id="header">
     <div id="status-dot" title="Gateway connection status"></div>
-    <h1>SageLLM</h1>
+    <h1>SageCoder</h1>
     <div id="model-badge" title="Click to switch model">No model</div>
     <button class="icon-btn" id="clear-btn" title="Clear conversation">🗑</button>
     <button class="icon-btn" id="restart-btn" title="Restart gateway (uses saved settings)">🔄</button>
@@ -607,7 +607,7 @@ export class ChatPanel {
   <div id="messages">
     <div id="welcome">
       <div class="big">🤖</div>
-      <h2>SageLLM Chat</h2>
+      <h2>SageCoder Chat</h2>
       <p>Ask anything — code, debugging, explanations.</p>
     </div>
   </div>
@@ -622,7 +622,7 @@ export class ChatPanel {
     <div id="input-row">
       <textarea
         id="user-input"
-        placeholder="Ask SageLLM anything… (Enter to send, Shift+Enter for newline)"
+        placeholder="Ask SageCoder anything… (Enter to send, Shift+Enter for newline)"
         rows="1"
         autofocus
       ></textarea>
@@ -676,7 +676,7 @@ export class ChatPanel {
 
       const roleEl = document.createElement('div');
       roleEl.className = 'msg-role';
-      roleEl.textContent = role === 'user' ? 'You' : role === 'assistant' ? 'SageLLM' : 'Error';
+      roleEl.textContent = role === 'user' ? 'You' : role === 'assistant' ? 'SageCoder' : 'Error';
 
       const body = document.createElement('div');
       body.className = 'msg-body';
@@ -702,7 +702,7 @@ export class ChatPanel {
 
       const roleEl = document.createElement('div');
       roleEl.className = 'msg-role';
-      roleEl.textContent = 'SageLLM';
+      roleEl.textContent = 'SageCoder';
 
       const body = document.createElement('div');
       body.className = 'msg-body typing-indicator';
@@ -807,7 +807,7 @@ export class ChatPanel {
           currentAssistantEl = null;
           const w = document.createElement('div');
           w.id = 'welcome'; w.classList.add('');
-          w.innerHTML = '<div class="big">🤖</div><h2>SageLLM Chat</h2><p>Ask anything</p>';
+          w.innerHTML = '<div class="big">🤖</div><h2>SageCoder Chat</h2><p>Ask anything</p>';
           messagesEl.appendChild(w);
           break;
 
@@ -884,7 +884,7 @@ function getNonce(): string {
 }
 
 /**
- * WebviewViewProvider for the SageLLM Chat **sidebar** view (sagellm.chatView).
+ * WebviewViewProvider for the SageCoder Chat **sidebar** view (sagellm.chatView).
  *
  * Provides the same chat interface as ChatPanel but embedded in the sidebar so
  * users don't need to run a separate command.  Both the sidebar view and the
@@ -1090,7 +1090,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline';" />
-  <title>SageLLM Chat</title>
+  <title>SageCoder Chat</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -1159,7 +1159,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <body>
   <div id="header">
     <div id="status-dot" title="Gateway connection status"></div>
-    <h1>SageLLM</h1>
+    <h1>SageCoder</h1>
     <div id="model-badge" title="Click to switch model">No model</div>
     <button class="icon-btn" id="clear-btn" title="Clear conversation">🗑</button>
     <button class="icon-btn" id="restart-btn" title="Restart gateway (uses saved settings)">🔄</button>
@@ -1168,7 +1168,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div id="messages">
     <div id="welcome">
       <div class="big">🤖</div>
-      <h2>SageLLM Chat</h2>
+      <h2>SageCoder Chat</h2>
       <p>Ask anything — code, debugging, explanations.</p>
     </div>
   </div>
@@ -1180,7 +1180,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <a id="retry-link">Retry</a>
     </div>
     <div id="input-row">
-      <textarea id="user-input" placeholder="Ask SageLLM anything… (Enter to send)" rows="1" autofocus></textarea>
+      <textarea id="user-input" placeholder="Ask SageCoder anything… (Enter to send)" rows="1" autofocus></textarea>
       <button id="send-btn">Send</button>
       <button id="abort-btn">Stop</button>
     </div>
@@ -1208,7 +1208,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     function appendMessage(role, text) {
       hideWelcome();
       const div = document.createElement('div'); div.className = 'msg ' + role;
-      const roleEl = document.createElement('div'); roleEl.className = 'msg-role'; roleEl.textContent = role === 'user' ? 'You' : role === 'assistant' ? 'SageLLM' : 'Error';
+      const roleEl = document.createElement('div'); roleEl.className = 'msg-role'; roleEl.textContent = role === 'user' ? 'You' : role === 'assistant' ? 'SageCoder' : 'Error';
       const body = document.createElement('div'); body.className = 'msg-body';
       if (role === 'assistant') { body.innerHTML = renderMarkdown(text); } else { body.textContent = text; }
       div.appendChild(roleEl); div.appendChild(body); messagesEl.appendChild(div); messagesEl.scrollTop = messagesEl.scrollHeight; return body;
@@ -1216,7 +1216,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     function appendTypingIndicator() {
       hideWelcome();
       const div = document.createElement('div'); div.className = 'msg assistant'; div.id = 'typing-msg';
-      const roleEl = document.createElement('div'); roleEl.className = 'msg-role'; roleEl.textContent = 'SageLLM';
+      const roleEl = document.createElement('div'); roleEl.className = 'msg-role'; roleEl.textContent = 'SageCoder';
       const body = document.createElement('div'); body.className = 'msg-body typing-indicator'; body.innerHTML = '<span></span><span></span><span></span>';
       div.appendChild(roleEl); div.appendChild(body); messagesEl.appendChild(div); messagesEl.scrollTop = messagesEl.scrollHeight; return div;
     }
@@ -1251,7 +1251,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case 'assistantStart': { const td = appendTypingIndicator(); const b = td.querySelector('.msg-body'); b.className = 'msg-body'; b.textContent = ''; currentAssistantEl = b; td.id = ''; break; }
         case 'assistantDelta': if (currentAssistantEl) { currentAssistantEl.innerHTML = renderMarkdown((currentAssistantEl._raw || '') + msg.text); currentAssistantEl._raw = (currentAssistantEl._raw || '') + msg.text; messagesEl.scrollTop = messagesEl.scrollHeight; } break;
         case 'assistantEnd': setStreaming(false); currentAssistantEl = null; break;
-        case 'cleared': messagesEl.innerHTML = ''; setStreaming(false); currentAssistantEl = null; const w = document.createElement('div'); w.id = 'welcome'; w.innerHTML = '<div class="big">🤖</div><h2>SageLLM Chat</h2><p>Ask anything</p>'; messagesEl.appendChild(w); break;
+        case 'cleared': messagesEl.innerHTML = ''; setStreaming(false); currentAssistantEl = null; const w = document.createElement('div'); w.id = 'welcome'; w.innerHTML = '<div class="big">🤖</div><h2>SageCoder Chat</h2><p>Ask anything</p>'; messagesEl.appendChild(w); break;
         case 'error': setStreaming(false); currentAssistantEl = null; appendMessage('error', '⚠️ ' + msg.text); break;
         case 'toolCall': { const td = document.createElement('div'); td.className = 'tool-call-msg'; let as = ''; try { const a = JSON.parse(msg.args||'{}'); as = Object.values(a).slice(0,2).join(', '); } catch {} td.textContent = '🔧 ' + msg.tool + (as ? '(' + as + ')' : ''); messagesEl.appendChild(td); messagesEl.scrollTop = messagesEl.scrollHeight; break; }
         case 'toolNote': { const nd = document.createElement('div'); nd.className = 'tool-note-msg'; nd.textContent = msg.text; messagesEl.appendChild(nd); messagesEl.scrollTop = messagesEl.scrollHeight; break; }

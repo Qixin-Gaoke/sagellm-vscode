@@ -24,6 +24,12 @@ interface CatalogModel {
   desc: string;     // one-line description
 }
 
+let modelDownloadInProgress = false;
+
+export function isModelDownloadInProgress(): boolean {
+  return modelDownloadInProgress;
+}
+
 export const MODEL_CATALOG: CatalogModel[] = [
   // ── Tiny / CPU-friendly ──────────────────────────────────────────────────
   { id: "Qwen/Qwen2.5-0.5B-Instruct",              size: "0.5B", vram: "~1 GB",  tags: ["chat","cpu-ok","fast"],   desc: "Tiny Qwen chat, runs on CPU" },
@@ -53,7 +59,141 @@ function hfDirName(modelId: string): string {
   return "models--" + modelId.replace(/\//g, "--");
 }
 
+function expandHomeDir(input: string): string {
+  if (!input) return input;
+  if (input.startsWith("~/")) {
+    return path.join(os.homedir(), input.slice(2));
+  }
+  return input;
+}
+
+function hasModelWeights(dir: string): boolean {
+  try {
+    const stack = [dir];
+    while (stack.length) {
+      const cur = stack.pop()!;
+      for (const entry of fs.readdirSync(cur, { withFileTypes: true })) {
+        const full = path.join(cur, entry.name);
+        if (entry.isDirectory()) {
+          stack.push(full);
+          continue;
+        }
+        if (
+          entry.name.endsWith(".safetensors") ||
+          entry.name.endsWith(".gguf") ||
+          entry.name.endsWith(".bin")
+        ) {
+          return true;
+        }
+      }
+    }
+  } catch { /* ignore */ }
+  return false;
+}
+
+/** Cached result of workstationModelDirs(), cleared when workspace folders change. */
+let _workstationDirsCache: string[] | null = null;
+vscode.workspace.onDidChangeWorkspaceFolders(() => { _workstationDirsCache = null; });
+
+function workstationModelDirs(): string[] {
+  if (_workstationDirsCache) return _workstationDirsCache;
+  const dirs = new Set<string>();
+  dirs.add(path.join(os.homedir(), "Downloads", "sagellm-models"));
+
+  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+    const wsPath = folder.uri.fsPath;
+    if (path.basename(wsPath) !== "sagellm-workstation") continue;
+
+    const ini = path.join(wsPath, "config.ini");
+    try {
+      const txt = fs.readFileSync(ini, "utf8");
+      const m = txt.match(/^\s*models_dir\s*=\s*(.+)\s*$/m);
+      if (m && m[1]) {
+        dirs.add(expandHomeDir(m[1].trim()));
+      }
+    } catch { /* ignore */ }
+  }
+
+  _workstationDirsCache = [...dirs];
+  return _workstationDirsCache;
+}
+
+function localWorkstationModelPath(modelId: string): string | undefined {
+  const shortId = modelId.split("/").pop() ?? modelId;
+  const candidates = [modelId, shortId];
+
+  for (const baseDir of workstationModelDirs()) {
+    for (const candidate of candidates) {
+      const modelDir = path.join(baseDir, candidate);
+      if (fs.existsSync(modelDir) && hasModelWeights(modelDir)) {
+        return modelDir;
+      }
+    }
+  }
+  return undefined;
+}
+
+interface WorkstationLocalModel {
+  idOrPath: string;
+  display: string;
+  description: string;
+}
+
+function discoverWorkstationLocalModels(): WorkstationLocalModel[] {
+  const out: WorkstationLocalModel[] = [];
+  const seen = new Set<string>();
+
+  const byShort = new Map<string, string>();
+  for (const model of MODEL_CATALOG) {
+    const short = model.id.split("/").pop() ?? model.id;
+    byShort.set(short, model.id);
+  }
+
+  for (const baseDir of workstationModelDirs()) {
+    if (!fs.existsSync(baseDir)) continue;
+    let entries: fs.Dirent[] = [];
+    try {
+      entries = fs.readdirSync(baseDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const full = path.join(baseDir, entry.name);
+      if (!hasModelWeights(full)) continue;
+
+      const mapped = byShort.get(entry.name);
+      if (mapped) {
+        if (!seen.has(mapped)) {
+          seen.add(mapped);
+          out.push({
+            idOrPath: mapped,
+            display: mapped,
+            description: "workstation local",
+          });
+        }
+        continue;
+      }
+
+      if (!seen.has(full)) {
+        seen.add(full);
+        out.push({
+          idOrPath: full,
+          display: entry.name,
+          description: "workstation local path",
+        });
+      }
+    }
+  }
+
+  return out;
+}
+
 export function isModelDownloaded(modelId: string): boolean {
+  if (localWorkstationModelPath(modelId)) {
+    return true;
+  }
   const dir = path.join(hfCacheDir(), hfDirName(modelId));
   return fs.existsSync(dir);
 }
@@ -68,6 +208,14 @@ function localModelIds(): Set<string> {
       }
     }
   } catch { /* ignore */ }
+
+  // Also treat workstation-local catalog models as downloaded.
+  for (const model of discoverWorkstationLocalModels()) {
+    if (!model.idOrPath.startsWith("/")) {
+      set.add(model.idOrPath);
+    }
+  }
+
   return set;
 }
 
@@ -76,23 +224,199 @@ function localModelIds(): Set<string> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Download a HuggingFace model using huggingface-cli.
+ * Collect candidate Python executables in priority order.
+ * Result is cached for the lifetime of the extension host (conda envs don't
+ * change while VS Code is open).
+ */
+let _candidatePythonsCache: string[] | null = null;
+function candidatePythons(): string[] {
+  if (_candidatePythonsCache) return _candidatePythonsCache;
+  const candidates: string[] = [];
+  const home = os.homedir();
+
+  // Active conda / venv prefix (present when VS Code is launched from a conda shell)
+  for (const envVar of ["CONDA_PREFIX", "VIRTUAL_ENV"]) {
+    const prefix = process.env[envVar];
+    if (prefix) {
+      candidates.push(path.join(prefix, "bin", "python"));
+    }
+  }
+
+  // Enumerate all envs under common conda base directories
+  for (const baseName of ["miniforge3", "miniconda3", "anaconda3", "mambaforge", "micromamba"]) {
+    const base = path.join(home, baseName);
+    if (!fs.existsSync(base)) { continue; }
+    // base env
+    candidates.push(path.join(base, "bin", "python"));
+    // all named envs
+    const envsDir = path.join(base, "envs");
+    try {
+      for (const envName of fs.readdirSync(envsDir)) {
+        candidates.push(path.join(envsDir, envName, "bin", "python"));
+      }
+    } catch { /* envs dir may not exist */ }
+  }
+
+  // ~/.local/bin (pip install --user)
+  candidates.push(path.join(home, ".local", "bin", "python3"));
+  candidates.push(path.join(home, ".local", "bin", "python"));
+
+  // System fallback (last resort)
+  candidates.push("python3", "python");
+
+  _candidatePythonsCache = [...new Set(candidates)];
+  return _candidatePythonsCache;
+}
+
+/**
+ * huggingface_hub >= 1.0 moved the CLI to huggingface_hub.cli.hf
+ * huggingface_hub < 1.0 used huggingface_hub.commands.huggingface_cli
+ * Try both so we work across versions.
+ */
+const HF_MODULE_CANDIDATES = [
+  "huggingface_hub.cli.hf",             // >= 1.0
+  "huggingface_hub.commands.huggingface_cli",  // < 1.0
+];
+
+/**
+ * Resolve the huggingface-cli executable.
+ *
+ * Strategy (in order):
+ *   1. huggingface-cli binary in PATH or any conda env bin dir
+ *   2. python -m <hf_module> using the first Python that has huggingface_hub
+ *
+ * Returns null if nothing works; caller must show an actionable error.
+ */
+async function resolveHfCli(): Promise<{ cmd: string; prefixArgs: string[] } | null> {
+  const home = os.homedir();
+
+  // ── 1. Binary search ────────────────────────────────────────────────────
+  //   a) system PATH
+  const whichCmd = process.platform === "win32" ? "where huggingface-cli" : "which huggingface-cli";
+  const found = await execQuick(whichCmd, 3000);
+  if (found) {
+    return { cmd: found.split(/\r?\n/)[0].trim(), prefixArgs: [] };
+  }
+
+  //   b) bin dirs alongside every candidate Python
+  const binDirs = [
+    path.join(home, ".local", "bin"),
+    ...candidatePythons()
+      .filter((p) => path.isAbsolute(p))
+      .map((p) => path.dirname(p)),
+  ];
+  for (const dir of [...new Set(binDirs)]) {
+    const cli = path.join(dir, "huggingface-cli");
+    if (fs.existsSync(cli)) {
+      return { cmd: cli, prefixArgs: [] };
+    }
+  }
+
+  // ── 2. Python module fallback ────────────────────────────────────────────
+  for (const py of candidatePythons()) {
+    if (path.isAbsolute(py) && !fs.existsSync(py)) { continue; }
+    // Quick import check
+    const canImport = await execQuick(
+      `"${py}" -c "import huggingface_hub" 2>/dev/null && echo ok`,
+      5000
+    );
+    if (!canImport.includes("ok")) { continue; }
+
+    // Find the first module path that actually works with this Python
+    for (const mod of HF_MODULE_CANDIDATES) {
+      const modOk = await execQuick(
+        `"${py}" -m ${mod} --help 2>/dev/null && echo ok`,
+        5000
+      );
+      if (modOk.includes("ok")) {
+        return { cmd: py, prefixArgs: ["-m", mod] };
+      }
+    }
+  }
+
+  return null; // nothing found
+}
+
+/**
+ * Download a HuggingFace model using huggingface-cli (with automatic PATH resolution).
  * Shows a cancellable VS Code progress notification.
  * Returns true on success, false if cancelled or failed.
  */
 export async function downloadModel(modelId: string): Promise<boolean> {
+  modelDownloadInProgress = true;
   return vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
-      title: `SageLLM: Downloading ${modelId}`,
+      title: `SageCoder: Downloading ${modelId}`,
       cancellable: true,
     },
     async (progress, token) => {
+      const cfg = vscode.workspace.getConfiguration("sagellm");
+      const hfEndpoint = cfg.get<string>("huggingface.endpoint", "").trim();
+      const hfCli = await resolveHfCli();
+      if (!hfCli) {
+        const action = await vscode.window.showErrorMessage(
+          "SageCoder: 未找到 huggingface_hub。请在 sage conda 环境中运行：\n" +
+          "  pip install \"huggingface_hub>=1.0.0\"",
+          "复制安装命令"
+        );
+        if (action === "复制安装命令") {
+          vscode.env.clipboard.writeText('pip install "huggingface_hub>=1.0.0"');
+        }
+        modelDownloadInProgress = false;
+        return false;
+      }
+      const { cmd, prefixArgs } = hfCli;
+
+      // Resolve the destination directory inside workstation's models_dir
+      const shortName = modelId.split("/").pop() ?? modelId;
+      const primaryModelsDir = workstationModelDirs()[0];
+      const localDir = path.join(primaryModelsDir, shortName);
+      try {
+        fs.mkdirSync(localDir, { recursive: true });
+      } catch { /* ignore */ }
+
+      const downloadArgs = [
+        ...prefixArgs,
+        "download",
+        modelId,
+        "--local-dir", localDir,
+        "--include", "*.safetensors",
+        "--include", "*.safetensors.index.json",
+        "--include", "*.gguf",
+        "--include", "*.json",
+        "--include", "tokenizer.model",
+        "--include", "*.tiktoken",
+        "--include", "*.txt",
+        "--exclude", "*.bin",
+        "--exclude", "*.pt",
+        "--exclude", "*.h5",
+        "--exclude", "*.ot",
+        "--exclude", "*.msgpack",
+        "--exclude", "*.onnx",
+        "--exclude", "*.ckpt",
+        "--exclude", "*.tar",
+        "--exclude", "*.zip",
+        "--exclude", "*.md",
+        "--exclude", "*.png",
+        "--exclude", "*.jpg",
+        "--exclude", "*.jpeg",
+        "--exclude", "*.webp",
+      ];
       return new Promise<boolean>((resolve) => {
         const proc = cp.spawn(
-          "huggingface-cli",
-          ["download", modelId, "--resume-download"],
-          { env: { ...process.env } }
+          cmd,
+          downloadArgs,
+          {
+            env: {
+              ...process.env,
+              HF_HUB_OFFLINE: "0",
+              TRANSFORMERS_OFFLINE: "0",
+              HF_HUB_ETAG_TIMEOUT: "10",
+              HF_HUB_DOWNLOAD_TIMEOUT: "30",
+              ...(hfEndpoint ? { HF_ENDPOINT: hfEndpoint } : {}),
+            },
+          }
         );
 
         let lastPct = 0;
@@ -133,24 +457,34 @@ export async function downloadModel(modelId: string): Promise<boolean> {
         proc.on("close", (code) => {
           if (code === 0) {
             progress.report({ increment: 100 - lastPct, message: "完成 ✓" });
+            modelDownloadInProgress = false;
             resolve(true);
           } else if (token.isCancellationRequested) {
+            modelDownloadInProgress = false;
             resolve(false);
           } else {
+            if (stderr.includes("LocalEntryNotFoundError")) {
+              vscode.window.showErrorMessage(
+                "SageCoder: 无法访问 Hugging Face（可能网络受限或离线模式开启）。请在设置中填写 sagellm.huggingface.endpoint（例如 https://hf-mirror.com），或先在终端运行 `hf auth login` 后重试。"
+              );
+            }
             vscode.window.showErrorMessage(
-              `SageLLM: 下载失败 (exit ${code}).\n${stderr.slice(-300)}`
+              `SageCoder: 下载失败 (exit ${code}).\n${stderr.slice(-300)}`
             );
+            modelDownloadInProgress = false;
             resolve(false);
           }
         });
 
         proc.on("error", (err) => {
-          vscode.window.showErrorMessage(`SageLLM: 无法运行 huggingface-cli: ${err.message}`);
+          vscode.window.showErrorMessage(`SageCoder: 无法运行 huggingface-cli: ${err.message}`);
+          modelDownloadInProgress = false;
           resolve(false);
         });
 
         token.onCancellationRequested(() => {
           proc.kill("SIGTERM");
+          modelDownloadInProgress = false;
           resolve(false);
         });
       });
@@ -276,6 +610,7 @@ export async function buildModelPickerItems(
     tryFetchGatewayModels(),
     Promise.resolve(localModelIds()),
   ]);
+  const workstationLocals = discoverWorkstationLocalModels();
 
   const seen = new Set<string>();
   const items: vscode.QuickPickItem[] = [];
@@ -309,7 +644,7 @@ export async function buildModelPickerItems(
   const downloadedItems: vscode.QuickPickItem[] = [];
   const addDownloaded = (id: string, desc: string) => {
     if (seen.has(id)) return; seen.add(id);
-    const corrupt = isModelDownloadCorrupt(id);
+    const corrupt = !id.startsWith("/") && isModelDownloadCorrupt(id);
     downloadedItems.push({
       label: corrupt ? `$(warning) ${id}` : `$(database) ${id}`,
       description: corrupt ? `⚠️ 下载损坏，选择后可修复 — ${desc}` : `✅ ${desc}`,
@@ -319,6 +654,17 @@ export async function buildModelPickerItems(
   downloadedCatalog.forEach((m) => addDownloaded(m.id, `${m.size} · ${m.vram} · ${m.desc}`));
   recentDownloaded.forEach((id) => addDownloaded(id, "recent"));
   downloadedExtra.forEach((id) => addDownloaded(id, "local cache"));
+  for (const local of workstationLocals) {
+    if (local.idOrPath.startsWith("/")) {
+      if (seen.has(local.idOrPath)) continue;
+      seen.add(local.idOrPath);
+      downloadedItems.push({
+        label: `$(database) ${local.display}`,
+        description: `✅ ${local.description}`,
+        detail: local.idOrPath,
+      });
+    }
+  }
 
   if (downloadedItems.length) {
     items.push({ label: "Downloaded", kind: SEP });
@@ -384,7 +730,7 @@ export async function promptAndStartServer(
     !backends.some((b) => b.id === savedBackend)
   ) {
     vscode.window.showWarningMessage(
-      `SageLLM: 上次使用的 "${savedBackend}" 后端未检测到，请重新选择。`
+      `SageCoder: 上次使用的 "${savedBackend}" 后端未检测到，请重新选择。`
     );
   }
 
@@ -411,7 +757,7 @@ export async function promptAndStartServer(
     }
 
     const pickedBackend = (await vscode.window.showQuickPick(backendItems, {
-      title: "SageLLM: 选择推理后端",
+      title: "SageCoder: 选择推理后端",
       placeHolder: "$(star-full) 上次使用  · $(zap) GPU  · $(circuit-board) CPU",
     })) as vscode.QuickPickItem | undefined;
     if (!pickedBackend) {
@@ -427,13 +773,13 @@ export async function promptAndStartServer(
   const savedModel   = cfg.get<string>("preloadModel", "").trim();
 
   const modelItems = await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: "SageLLM: Scanning models…", cancellable: false },
+    { location: vscode.ProgressLocation.Notification, title: "SageCoder: Scanning models…", cancellable: false },
     () => buildModelPickerItems(recentModels, savedModel)
   );
 
   const totalDownloadable = MODEL_CATALOG.filter((m) => !isModelDownloaded(m.id)).length;
   const pickedModel = await vscode.window.showQuickPick(modelItems, {
-    title: `SageLLM: Select Model  (☁️ ${totalDownloadable} available to download)`,
+    title: `SageCoder: Select Model  (☁️ ${totalDownloadable} available to download)`,
     placeHolder: "✅ downloaded · ☁️ will auto-download · $(edit) custom path",
     matchOnDescription: true,
     matchOnDetail: false,
@@ -443,7 +789,7 @@ export async function promptAndStartServer(
   let modelId = pickedModel.detail!;
   if (modelId === "__custom__") {
     modelId = (await vscode.window.showInputBox({
-      title: "SageLLM: Model Path or HuggingFace ID",
+      title: "SageCoder: Model Path or HuggingFace ID",
       prompt: "e.g.  Qwen/Qwen2.5-7B-Instruct  or  /models/my-model",
       value: savedModel,
       ignoreFocusOut: true,
@@ -452,10 +798,16 @@ export async function promptAndStartServer(
     modelId = modelId.trim();
   }
 
+  let launchModel = modelId;
+
   // ── 3. Check cache integrity / download if not cached ────────────────────
   if (!modelId.startsWith("/")) {
-    if (isModelDownloaded(modelId)) {
-      // Model is cached — verify no shards are still .incomplete from a
+    const localWsPath = localWorkstationModelPath(modelId);
+    if (localWsPath) {
+      launchModel = localWsPath;
+      vscode.window.showInformationMessage(`SageCoder: 使用本地模型目录 ${localWsPath}`);
+    } else if (isModelDownloaded(modelId)) {
+      // Model is in HF cache — verify no shards are still .incomplete from a
       // previously-interrupted download (would cause a load-time crash).
       const repairOk = await offerRepairIfCorrupt(modelId);
       if (!repairOk) { sb?.setGatewayStatus(false); return; }
@@ -482,9 +834,9 @@ export async function promptAndStartServer(
 
   // ── 5. Launch server ──────────────────────────────────────────────────────
   const baseCmd = cfg.get<string>("gatewayStartCommand", "sagellm serve");
-  const cmd     = `${baseCmd} --backend ${backendId} --model ${modelId} --port ${port}`;
+  const cmd     = `${baseCmd} --backend ${backendId} --model ${launchModel} --port ${port}`;
   const terminal = vscode.window.createTerminal({
-    name: "SageLLM Server",
+    name: "SageCoder Server",
     isTransient: false,
     // Disable preflight canary — it loads the model via `transformers` BEFORE the
     // engine starts, doubling memory usage and adding 2–10 min to startup time.
@@ -494,7 +846,7 @@ export async function promptAndStartServer(
   });
   terminal.sendText(cmd);
   terminal.show(false);
-  vscode.window.showInformationMessage(`SageLLM: Starting ${backendId.toUpperCase()} · ${modelId}…`);
+  vscode.window.showInformationMessage(`SageCoder: Starting ${backendId.toUpperCase()} · ${modelId}…`);
 
   // ── 6. Poll until healthy (up to 5 min — model loading can be slow) ───────
   let attempts = 0;
@@ -504,13 +856,13 @@ export async function promptAndStartServer(
     if (await checkHealth()) {
       clearInterval(poll);
       sb?.setGatewayStatus(true);
-      vscode.window.showInformationMessage(`SageLLM: Server ready ✓  (${backendId} · ${modelId})`);
+      vscode.window.showInformationMessage(`SageCoder: Server ready ✓  (${backendId} · ${modelId})`);
     } else if (attempts >= maxPollAttempts) {
       clearInterval(poll);
       sb?.setError("Server start timed out");
       vscode.window
         .showWarningMessage(
-          "SageLLM: Server 5 分钟内未响应。",
+          "SageCoder: Server 5 分钟内未响应。",
           "运行诊断",
           "查看终端"
         )
@@ -522,7 +874,7 @@ export async function promptAndStartServer(
     } else if (attempts % 20 === 0) {
       // Notify user every minute so they know it's still loading
       const elapsed = Math.round(attempts * 3 / 60);
-      vscode.window.setStatusBarMessage(`SageLLM: Loading model… (${elapsed} min elapsed)`, 5000);
+      vscode.window.setStatusBarMessage(`SageCoder: Loading model… (${elapsed} min elapsed)`, 5000);
     }
   }, 3000);
 }

@@ -1,5 +1,27 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Rename: SageLLM → SageCoder** — display name, activity bar title, status bar, chat panel, all command titles, and extension description updated to "SageCoder". Internal `sagellm.*` config keys and command IDs are unchanged.
+- **Extension description** updated to reflect code-generation-assistant positioning (inline completions, chat, explain/fix/test/docstring). Added `"Programming Languages"` VS Code category and `sagecoder`/`code generation`/`copilot` keywords.
+- **Default system prompt** updated: model now introduces itself as "SageCoder, an expert AI coding assistant".
+
+### Fixed
+- **Download path unification**: Model downloads from the extension now write to the workstation `models_dir` (`~/Downloads/sagellm-models/<ModelName>`) instead of `~/.cache/huggingface/hub`. This aligns the extension's download destination with `sagellm-workstation`, so downloaded models are immediately found by the workstation local-path scanner with no duplication.
+- **`setModel()` missing `await`**: `vscode.workspace.getConfiguration().update()` was called without `await`, meaning the setting could be lost if VS Code shut down before the promise resolved.
+- **Retry timer leak on deactivate**: `scheduleRetryConnect()` created `setTimeout` timers that were never cancelled when the extension was deactivated. Added `retryTimer` tracking and a dispose subscription to clear it on shutdown.
+- **Dead `gatewayProcess` variable**: `startGateway()` used a VS Code terminal, so `gatewayProcess: cp.ChildProcess` was never assigned — making `stopGateway()` a no-op. Replaced with `activeGatewayTerminal: vscode.Terminal` which is correctly assigned and disposed.
+- **Inline completion skips template literals**: `shouldSkip()` ignored backtick-quoted template literal strings when counting unbalanced quotes, causing completions to be incorrectly suppressed inside TypeScript/JavaScript template literals.
+- **`nativeCompletionsAvailable` not reset after gateway restart**: If the gateway reconnected (e.g. after a restart that added `/v1/completions` support), the inline provider kept the stale `false` value and never re-probed. `resetCache()` is now called on every successful gateway reconnect.
+
+### Performance
+- **Memoize `candidatePythons()`**: The function previously scanned the entire `~/miniforge3/envs/` directory on every call; called twice per download attempt. Now cached for the lifetime of the extension host.
+- **Memoize `workstationModelDirs()`**: Previously re-read `config.ini` and iterated workspace folders on every call (invoked by `isModelDownloaded`, `localWorkstationModelPath`, `discoverWorkstationLocalModels`). Now cached and automatically invalidated via `onDidChangeWorkspaceFolders`.
+
+### Fixed
+- **Model selection bypasses download step**: When a user selected a model from the "Available to download" list, the extension immediately offered to restart the gateway (which triggered `sagellm serve` and inline model pull with no progress UI). The flow now first asks to download via `huggingface-cli` (with VS Code progress notification, speed, and ETA), and only offers to restart the gateway after the download completes.
+
 ## [0.1.12] — 2026-03-05
 
 ### Fixed

@@ -1,7 +1,7 @@
 {
   "name": "sagellm-vscode",
-  "displayName": "SageLLM",
-  "description": "SageLLM inference engine integration for VS Code — chat, code completion, and model management via sagellm-gateway",
+  "displayName": "SageCoder",
+  "description": "AI code generation assistant powered by SageLLM — inline completions, chat, code explanation, test generation, and local model management",
   "version": "0.1.19",
   "publisher": "intellistream",
   "license": "MIT",
@@ -20,15 +20,19 @@
   "categories": [
     "AI",
     "Chat",
+    "Programming Languages",
     "Machine Learning",
     "Other"
   ],
   "keywords": [
+    "sagecoder",
     "sagellm",
     "llm",
     "ai",
-    "chat",
+    "code generation",
     "code completion",
+    "copilot",
+    "chat",
     "intellistream"
   ],
   "activationEvents": [
@@ -39,72 +43,72 @@
     "commands": [
       {
         "command": "sagellm.openChat",
-        "title": "SageLLM: Open Chat",
+        "title": "SageCoder: Open Chat",
         "icon": "$(comment-discussion)"
       },
       {
         "command": "sagellm.selectModel",
-        "title": "SageLLM: Select Model",
+        "title": "SageCoder: Select Model",
         "icon": "$(list-selection)"
       },
       {
         "command": "sagellm.startGateway",
-        "title": "SageLLM: Start Server",
+        "title": "SageCoder: Start Server",
         "icon": "$(play)"
       },
       {
         "command": "sagellm.configureServer",
-        "title": "SageLLM: Configure & Start Server",
+        "title": "SageCoder: Configure & Start Server",
         "icon": "$(settings-gear)"
       },
       {
         "command": "sagellm.stopGateway",
-        "title": "SageLLM: Stop Gateway",
+        "title": "SageCoder: Stop Gateway",
         "icon": "$(stop)"
       },
       {
         "command": "sagellm.restartGateway",
-        "title": "SageLLM: Restart Gateway",
+        "title": "SageCoder: Restart Gateway",
         "icon": "$(debug-restart)"
       },
       {
         "command": "sagellm.showInstallGuide",
-        "title": "SageLLM: Installation Guide",
+        "title": "SageCoder: Installation Guide",
         "icon": "$(book)"
       },
       {
         "command": "sagellm.refreshModels",
-        "title": "SageLLM: Refresh Models",
+        "title": "SageCoder: Refresh Models",
         "icon": "$(refresh)"
       },
       {
         "command": "sagellm.checkConnection",
-        "title": "SageLLM: Check Connection",
+        "title": "SageCoder: Check Connection",
         "icon": "$(plug)"
       },
       {
         "command": "sagellm.explainCode",
-        "title": "SageLLM: Explain Code",
+        "title": "SageCoder: Explain Code",
         "icon": "$(question)"
       },
       {
         "command": "sagellm.generateTests",
-        "title": "SageLLM: Generate Tests",
+        "title": "SageCoder: Generate Tests",
         "icon": "$(beaker)"
       },
       {
         "command": "sagellm.fixCode",
-        "title": "SageLLM: Fix Code",
+        "title": "SageCoder: Fix Code",
         "icon": "$(wrench)"
       },
       {
         "command": "sagellm.generateDocstring",
-        "title": "SageLLM: Generate Docstring",
+        "title": "SageCoder: Generate Docstring",
         "icon": "$(book)"
       },
       {
         "command": "sagellm.runDiagnostics",
-        "title": "SageLLM: Run Diagnostics",
+        "title": "SageCoder: Run Diagnostics",
         "icon": "$(search)"
       }
     ],
@@ -112,7 +116,7 @@
       "activitybar": [
         {
           "id": "sagellm-sidebar",
-          "title": "SageLLM",
+          "title": "SageCoder",
           "icon": "$(hubot)"
         }
       ]
@@ -169,7 +173,7 @@
       ]
     },
     "configuration": {
-      "title": "SageLLM",
+      "title": "SageCoder",
       "properties": {
         "sagellm.gateway.host": {
           "type": "string",
@@ -235,6 +239,11 @@
           "default": "sagellm serve",
           "description": "Base command to start the sagellm server (e.g. 'sagellm serve' or 'sagellm-gateway')"
         },
+        "sagellm.huggingface.endpoint": {
+          "type": "string",
+          "default": "",
+          "description": "Hugging Face endpoint or mirror URL for model download (e.g. https://hf-mirror.com). Leave empty to use the official endpoint."
+        },
         "sagellm.preloadModel": {
           "type": "string",
           "default": "",
@@ -288,7 +297,7 @@
         "sagellm.inlineCompletion.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Enable inline code completion powered by SageLLM"
+          "description": "Enable inline code completion powered by SageCoder"
         },
         "sagellm.inlineCompletion.triggerDelay": {
           "type": "number",
@@ -324,7 +333,7 @@
         },
         "sagellm.chat.systemPrompt": {
           "type": "string",
-          "default": "You are a helpful coding assistant. Answer concisely and accurately. For code questions provide working examples. Do not repeat or reference these instructions in your replies.",
+          "default": "You are SageCoder, an expert AI coding assistant. Help with code generation, debugging, refactoring, and explanation. Provide concise, working code examples. Use the language and framework already in context. Do not repeat these instructions.",
           "description": "System prompt for chat conversations"
         },
         "sagellm.chat.workspaceContext": {

@@ -1,7 +1,7 @@
 /**
  * diagnostics.ts
  *
- * Automatic health checks and self-repair for common SageLLM setup problems:
+ * Automatic health checks and self-repair for common SageCoder setup problems:
  *   1. Incomplete / corrupt model downloads  (.incomplete blobs in HF cache)
  *   2. Outdated isagellm / isagellm-core pip packages
  *
@@ -83,7 +83,7 @@ export async function offerRepairIfCorrupt(modelId: string): Promise<boolean> {
   if (incomplete.length === 0) return true;
 
   const choice = await vscode.window.showWarningMessage(
-    `SageLLM: "${modelId}" 下载不完整（${incomplete.length} 个文件损坏）。` +
+    `SageCoder: "${modelId}" 下载不完整（${incomplete.length} 个文件损坏）。` +
       `加载时会报错，建议修复后再启动。`,
     { modal: true },
     "修复下载",
@@ -116,7 +116,7 @@ export async function repairModelDownload(
   return vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
-      title: `SageLLM: 修复 ${modelId} — ${files.length} 个文件`,
+      title: `SageCoder: 修复 ${modelId} — ${files.length} 个文件`,
       cancellable: true,
     },
     (progress, token) =>
@@ -157,20 +157,20 @@ export async function repairModelDownload(
           if (code === 0) {
             progress.report({ increment: 100 - lastPct, message: "完成 ✓" });
             vscode.window.showInformationMessage(
-              `✅ SageLLM: ${modelId} 修复完成`
+              `✅ SageCoder: ${modelId} 修复完成`
             );
             resolve(true);
           } else if (token.isCancellationRequested) {
             resolve(false);
           } else {
-            vscode.window.showErrorMessage(`SageLLM: 修复失败 (exit ${code})`);
+            vscode.window.showErrorMessage(`SageCoder: 修复失败 (exit ${code})`);
             resolve(false);
           }
         });
 
         proc.on("error", (err) => {
           vscode.window.showErrorMessage(
-            `SageLLM: 无法运行 huggingface-cli — ${err.message}`
+            `SageCoder: 无法运行 huggingface-cli — ${err.message}`
           );
           resolve(false);
         });
@@ -289,7 +289,7 @@ export function checkPackagesIfDue(context: vscode.ExtensionContext): void {
         .join(", ");
       vscode.window
         .showWarningMessage(
-          `SageLLM: 有新版本可用 — ${lines}`,
+          `SageCoder: 有新版本可用 — ${lines}`,
           "立即升级",
           "稍后"
         )
@@ -309,7 +309,7 @@ export function upgradePackagesInTerminal(
   const names = packages.filter((p) => p.needsUpgrade).map((p) => p.name);
   if (names.length === 0) return;
   const term = vscode.window.createTerminal({
-    name: "SageLLM: Upgrade",
+    name: "SageCoder: Upgrade",
     isTransient: true,
   });
   term.sendText(`pip install -U ${names.join(" ")}`);
@@ -354,7 +354,7 @@ export async function showDiagnosticsPanel(
 
   if (corruptModels.length === 0 && outdated.length === 0) {
     vscode.window.showInformationMessage(
-      "SageLLM: ✅ 未发现问题，环境配置正常"
+      "SageCoder: ✅ 未发现问题，环境配置正常"
     );
     return;
   }
@@ -399,14 +399,14 @@ export async function showDiagnosticsPanel(
 
     if (items.filter((i) => i.kind !== SEP).length === 0) {
       vscode.window.showInformationMessage(
-        "SageLLM: ✅ 所有问题已修复"
+        "SageCoder: ✅ 所有问题已修复"
       );
       return;
     }
 
     const issueCount = stillCorrupt.length + (stillOutdated.length > 0 ? 1 : 0);
     const picked = (await vscode.window.showQuickPick(items, {
-      title: "SageLLM 诊断 — 选择问题以修复",
+      title: "SageCoder 诊断 — 选择问题以修复",
       placeHolder: `发现 ${issueCount} 个问题，选择任意一项立即修复`,
     })) as (vscode.QuickPickItem & { _action?: string }) | undefined;
 
