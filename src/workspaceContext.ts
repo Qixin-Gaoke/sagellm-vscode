@@ -13,6 +13,7 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
+import { execSync } from "child_process";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tool definitions (OpenAI function calling format)
@@ -108,6 +109,41 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
       parameters: { type: "object", properties: {} },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "write_file",
+      description:
+        "Write content to a file in the workspace. Creates the file if it does not exist, or overwrites it. The user will be prompted to approve before any write is performed.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "File path relative to workspace root or absolute." },
+          content: { type: "string", description: "Full content to write to the file." },
+        },
+        required: ["path", "content"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "run_command",
+      description:
+        "Run a shell command in the workspace terminal. The user will be prompted to approve before execution. Returns command output.",
+      parameters: {
+        type: "object",
+        properties: {
+          command: { type: "string", description: "Shell command to execute." },
+          cwd: {
+            type: "string",
+            description: "Working directory relative to workspace root. Optional, defaults to workspace root.",
+          },
+        },
+        required: ["command"],
+      },
+    },
+  },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -127,6 +163,8 @@ export async function executeTool(name: string, args: ToolCallArgs): Promise<str
       case "list_directory":   return await toolListDirectory(args);
       case "search_code":      return await toolSearchCode(args);
       case "get_workspace_info": return await toolGetWorkspaceInfo();
+      case "write_file":       return await toolWriteFile(args);
+      case "run_command":      return await toolRunCommand(args);
       default:
         return `Unknown tool: ${name}`;
     }
@@ -321,6 +359,82 @@ async function toolGetWorkspaceInfo(): Promise<string> {
     `\nTop-level contents:\n${topLevel}`,
     openFiles.length ? `\nCurrently open files:\n${openFiles.map((f) => `  ${f}`).join("\n")}` : "",
   ].filter(Boolean).join("\n");
+}
+
+// ── write_file ───────────────────────────────────────────────────────────────
+
+async function toolWriteFile(args: ToolCallArgs): Promise<string> {
+  const filePath = String(args["path"] ?? "");
+  const content = String(args["content"] ?? "");
+
+  if (!filePath) return "Error: 'path' is required.";
+
+  const absPath = resolveWorkspacePath(filePath);
+  if (!absPath) return "Error: workspace root not found, cannot resolve path.";
+
+  const exists = fs.existsSync(absPath);
+  const lineCount = content.split("\n").length;
+
+  const choice = await vscode.window.showWarningMessage(
+    `SageCoder wants to write ${lineCount} line(s) to: ${filePath}`,
+    { modal: true, detail: exists ? "This will overwrite the existing file." : "This will create a new file." },
+    "Accept",
+    "Reject"
+  );
+
+  if (choice !== "Accept") return "Write rejected by user.";
+
+  const dir = path.dirname(absPath);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(absPath, content, "utf8");
+
+  // Reveal in editor
+  try {
+    const uri = vscode.Uri.file(absPath);
+    const doc = await vscode.workspace.openTextDocument(uri);
+    await vscode.window.showTextDocument(doc, { preview: true });
+  } catch { /* non-fatal */ }
+
+  return `Successfully wrote ${lineCount} line(s) to ${filePath}.`;
+}
+
+// ── run_command ──────────────────────────────────────────────────────────────
+
+async function toolRunCommand(args: ToolCallArgs): Promise<string> {
+  const command = String(args["command"] ?? "").trim();
+  const cwdRel = args["cwd"] ? String(args["cwd"]) : undefined;
+
+  if (!command) return "Error: 'command' is required.";
+
+  const wsRoot = getWorkspaceRoot();
+  const cwd = cwdRel ? (path.isAbsolute(cwdRel) ? cwdRel : path.join(wsRoot ?? ".", cwdRel)) : wsRoot;
+
+  const choice = await vscode.window.showWarningMessage(
+    `SageCoder wants to run a shell command:`,
+    {
+      modal: true,
+      detail: `$ ${command}${cwd ? `\n\nWorking directory: ${cwd}` : ""}`,
+    },
+    "Run",
+    "Cancel"
+  );
+
+  if (choice !== "Run") return "Command cancelled by user.";
+
+  // Execute via child_process and capture output
+  try {
+    const output = execSync(command, {
+      cwd: cwd ?? undefined,
+      encoding: "utf8",
+      timeout: 30_000,
+      maxBuffer: 512 * 1024,
+    });
+    return `Command: ${command}\nOutput:\n${output || "(no output)"}`;
+  } catch (err: unknown) {
+    const e = err as { message?: string; stdout?: string; stderr?: string; status?: number };
+    const out = [e.stdout, e.stderr].filter(Boolean).join("\n");
+    return `Command failed (exit ${e.status ?? "?"}): ${e.message ?? ""}\n${out}`.trim();
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

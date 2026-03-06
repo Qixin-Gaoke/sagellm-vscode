@@ -356,6 +356,56 @@ export class ChatPanel {
       case "restartGateway":
         vscode.commands.executeCommand("sagellm.restartGateway");
         break;
+      case "applyCode": {
+        const code = (message as { code?: string }).code ?? "";
+        const editor = vscode.window.activeTextEditor;
+        if (editor) {
+          await editor.edit((eb) => {
+            if (!editor.selection.isEmpty) {
+              eb.replace(editor.selection, code);
+            } else {
+              eb.insert(editor.selection.active, code);
+            }
+          });
+          vscode.window.showInformationMessage("SageCoder: code applied to editor.");
+        } else {
+          const doc = await vscode.workspace.openTextDocument({ content: code });
+          await vscode.window.showTextDocument(doc);
+        }
+        break;
+      }
+      case "copyToClipboard":
+        await vscode.env.clipboard.writeText((message as { text?: string }).text ?? "");
+        break;
+      case "compress": {
+        const msgs = this.history.filter((m) => m.role !== "system");
+        if (msgs.length < 4) {
+          this.panel.webview.postMessage({ type: "error", text: "Not enough history to compress yet." });
+          break;
+        }
+        this.panel.webview.postMessage({ type: "compressStart" });
+        try {
+          const summaryPrompt = `Summarize this conversation in 3–5 concise sentences, preserving key decisions, code snippets, and unanswered questions:\n\n${msgs.map((m) => `${m.role}: ${m.content}`).join("\n")}`;
+          const summary = await streamChatCompletion(
+            {
+              model: this.modelManager.currentModel ?? "",
+              messages: [{ role: "user", content: summaryPrompt }],
+              max_tokens: 512,
+              temperature: 0.3,
+            },
+            () => { /* discard streaming chunks */ }
+          );
+          const sys = this.history[0];
+          this.history = [
+            sys,
+            { role: "assistant", content: `[Compressed history] ${summary.trim()}` },
+          ];
+          this.panel.webview.postMessage({ type: "compressed", summary: summary.trim() });
+        } catch (err) {
+          this.panel.webview.postMessage({ type: "error", text: `Compression failed: ${err instanceof Error ? err.message : String(err)}` });
+        }
+        break;
+      }
     }
   }
 
@@ -592,6 +642,13 @@ export class ChatPanel {
       margin: 6px 0;
     }
     .msg-body pre code { background: none; padding: 0; }
+    .code-block-wrap { margin: 6px 0; border-radius: 6px; overflow: hidden; border: 1px solid var(--vscode-panel-border); }
+    .code-block-toolbar { display: flex; align-items: center; justify-content: space-between; background: var(--vscode-editorGroupHeader-tabsBackground, rgba(90,90,90,0.25)); padding: 4px 10px; }
+    .code-lang { font-size: 10px; color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family); text-transform: lowercase; }
+    .code-btn { background: none; border: 1px solid transparent; cursor: pointer; color: var(--vscode-foreground); font-size: 10px; padding: 2px 7px; border-radius: 3px; opacity: 0.7; line-height: 1.4; }
+    .code-btn:hover { opacity: 1; background: var(--vscode-button-secondaryBackground); border-color: var(--vscode-panel-border); }
+    .code-block-wrap pre { margin: 0; border-radius: 0; border: none; }
+    .code-btn-group { display: flex; gap: 4px; }
   </style>
 </head>
 <body>
@@ -629,7 +686,7 @@ export class ChatPanel {
       <button id="send-btn">Send</button>
       <button id="abort-btn">Stop</button>
     </div>
-    <div id="hint">Enter ↵ to send · Shift+Enter for newline · /clear to reset · @file:path for context</div>
+    <div id="hint">Enter ↵ to send · Shift+Enter for newline · /help for commands · @file:path for context</div>
   </div>
 
   <script nonce="${nonce}">
@@ -719,22 +776,73 @@ export class ChatPanel {
     function renderMarkdown(text) {
       // avoid backtick literals inside template literal — build regex at runtime
       const BT = String.fromCharCode(96);
-      const re3 = new RegExp(BT+BT+BT+'([\\s\\S]*?)'+BT+BT+BT, 'g');
+      const SQ = String.fromCharCode(39); // single-quote, avoids escape issues
+      const re3 = new RegExp(BT+BT+BT+'(\\w+)?\\n?([\\s\\S]*?)'+BT+BT+BT, 'g');
       const re1 = new RegExp(BT+'([^'+BT+']+)'+BT, 'g');
-      return text
-        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-        .replace(re3, '<pre><code>$1</code></pre>')
+      let cbIdx = 0;
+      const escaped = text
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      return escaped
+        .replace(re3, function(_, lang, code) {
+          var id = 'cb' + (cbIdx++);
+          var langLabel = lang ? '<span class="code-lang">' + lang + '</span>' : '<span class="code-lang"></span>';
+          var btns = '<div class="code-btn-group">'
+            + '<button class="code-btn" onclick="copyCode(' + SQ + id + SQ + ')">Copy</button>'
+            + '<button class="code-btn" onclick="applyCode(' + SQ + id + SQ + ')">Apply</button>'
+            + '</div>';
+          return '<div class="code-block-wrap"><div class="code-block-toolbar">' + langLabel + btns
+            + '</div><pre id="' + id + '"><code>' + code + '</code></pre></div>';
+        })
         .replace(re1, '<code>$1</code>')
         .replace(/[*][*](.*?)[*][*]/g, '<strong>$1</strong>')
         .replace(/[*](.*?)[*]/g, '<em>$1</em>');
     }
 
+    function copyCode(id) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const code = el.textContent || '';
+      navigator.clipboard.writeText(code).catch(() => {
+        vscode.postMessage({ type: 'copyToClipboard', text: code });
+      });
+      // Brief visual feedback
+      const btn = el.previousElementSibling
+        ? el.closest('.code-block-wrap')?.querySelector('.code-btn-group button:first-child') : null;
+      if (btn) { const orig = btn.textContent; btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = orig; }, 1200); }
+    }
+
+    function applyCode(id) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      vscode.postMessage({ type: 'applyCode', code: el.textContent || '' });
+    }
+
     function sendMessage() {
       const text = inputEl.value.trim();
       if (!text || isStreaming) return;
+      // Slash commands
       if (text === '/clear') {
-        inputEl.value = '';
-        vscode.postMessage({ type: 'clear' });
+        inputEl.value = ''; autoResize();
+        vscode.postMessage({ type: 'clear' }); return;
+      }
+      if (text === '/model') {
+        inputEl.value = ''; autoResize();
+        vscode.postMessage({ type: 'selectModel' }); return;
+      }
+      if (text === '/compress') {
+        inputEl.value = ''; autoResize();
+        vscode.postMessage({ type: 'compress' }); return;
+      }
+      if (text === '/help') {
+        inputEl.value = ''; autoResize();
+        appendMessage('assistant',
+          'Available commands:\n'
+          + '  /clear    — clear conversation history\n'
+          + '  /model    — switch model\n'
+          + '  /compress — summarize history to save context\n'
+          + '  /help     — show this help\n\n'
+          + 'Mention files with @file:path to include them as context.\n'
+          + 'Code blocks have Copy and Apply buttons.');
         return;
       }
       inputEl.value = '';
@@ -855,6 +963,14 @@ export class ChatPanel {
           inputEl.value = msg.text;
           autoResize();
           sendMessage();
+          break;
+
+        case 'compressStart':
+          appendMessage('assistant', '🗜 Compressing conversation history…');
+          break;
+
+        case 'compressed':
+          appendMessage('assistant', '✅ History compressed. ' + (msg.summary || 'Context is now shorter.'));
           break;
       }
     });
@@ -1043,6 +1159,56 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "restartGateway":
         vscode.commands.executeCommand("sagellm.restartGateway");
         break;
+      case "applyCode": {
+        const code = (message as { code?: string }).code ?? "";
+        const editor = vscode.window.activeTextEditor;
+        if (editor) {
+          await editor.edit((eb) => {
+            if (!editor.selection.isEmpty) {
+              eb.replace(editor.selection, code);
+            } else {
+              eb.insert(editor.selection.active, code);
+            }
+          });
+          vscode.window.showInformationMessage("SageCoder: code applied to editor.");
+        } else {
+          const doc = await vscode.workspace.openTextDocument({ content: code });
+          await vscode.window.showTextDocument(doc);
+        }
+        break;
+      }
+      case "copyToClipboard":
+        await vscode.env.clipboard.writeText((message as { text?: string }).text ?? "");
+        break;
+      case "compress": {
+        const msgs = this.history.filter((m) => m.role !== "system");
+        if (msgs.length < 4) {
+          this._view?.webview.postMessage({ type: "error", text: "Not enough history to compress yet." });
+          break;
+        }
+        this._view?.webview.postMessage({ type: "compressStart" });
+        try {
+          const summaryPrompt = `Summarize this conversation in 3–5 concise sentences, preserving key decisions, code snippets, and unanswered questions:\n\n${msgs.map((m) => `${m.role}: ${m.content}`).join("\n")}`;
+          const summary = await streamChatCompletion(
+            {
+              model: this.modelManager.currentModel ?? "",
+              messages: [{ role: "user", content: summaryPrompt }],
+              max_tokens: 512,
+              temperature: 0.3,
+            },
+            () => { /* discard streaming chunks */ }
+          );
+          const sys = this.history[0];
+          this.history = [
+            sys,
+            { role: "assistant", content: `[Compressed history] ${summary.trim()}` },
+          ];
+          this._view?.webview.postMessage({ type: "compressed", summary: summary.trim() });
+        } catch (err) {
+          this._view?.webview.postMessage({ type: "error", text: `Compression failed: ${err instanceof Error ? err.message : String(err)}` });
+        }
+        break;
+      }
     }
   }
 
@@ -1154,6 +1320,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     .msg-body code { background: var(--vscode-textCodeBlock-background); padding: 1px 4px; border-radius: 3px; font-family: var(--vscode-editor-font-family); font-size: 0.9em; }
     .msg-body pre { background: var(--vscode-textCodeBlock-background); padding: 6px 10px; border-radius: 6px; overflow-x: auto; margin: 4px 0; }
     .msg-body pre code { background: none; padding: 0; }
+    .code-block-wrap { margin: 4px 0; border-radius: 6px; overflow: hidden; border: 1px solid var(--vscode-panel-border); }
+    .code-block-toolbar { display: flex; align-items: center; justify-content: space-between; background: var(--vscode-editorGroupHeader-tabsBackground, rgba(90,90,90,0.25)); padding: 3px 8px; }
+    .code-lang { font-size: 10px; color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family); text-transform: lowercase; }
+    .code-btn { background: none; border: 1px solid transparent; cursor: pointer; color: var(--vscode-foreground); font-size: 10px; padding: 2px 6px; border-radius: 3px; opacity: 0.7; line-height: 1.4; }
+    .code-btn:hover { opacity: 1; background: var(--vscode-button-secondaryBackground); border-color: var(--vscode-panel-border); }
+    .code-block-wrap pre { margin: 0; border-radius: 0; border: none; }
+    .code-btn-group { display: flex; gap: 4px; }
   </style>
 </head>
 <body>
@@ -1184,7 +1357,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <button id="send-btn">Send</button>
       <button id="abort-btn">Stop</button>
     </div>
-    <div id="hint">Enter ↵ to send · Shift+Enter for newline · @file:path for context</div>
+    <div id="hint">Enter ↵ to send · Shift+Enter for newline · /help for commands · @file:path for context</div>
   </div>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
@@ -1222,13 +1395,38 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     function renderMarkdown(text) {
       const BT = String.fromCharCode(96);
-      const re3 = new RegExp(BT+BT+BT+'([\\s\\S]*?)'+BT+BT+BT, 'g');
+      const SQ = String.fromCharCode(39);
+      const re3 = new RegExp(BT+BT+BT+'(\\w+)?\\n?([\\s\\S]*?)'+BT+BT+BT, 'g');
       const re1 = new RegExp(BT+'([^'+BT+']+)'+BT, 'g');
-      return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(re3,'<pre><code>$1</code></pre>').replace(re1,'<code>$1</code>').replace(/[*][*](.*?)[*][*]/g,'<strong>$1</strong>').replace(/[*](.*?)[*]/g,'<em>$1</em>');
+      let cbIdx = 0;
+      const escaped = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      return escaped
+        .replace(re3, function(_, lang, code) {
+          var id = 'cb' + (cbIdx++);
+          var langLabel = lang ? '<span class="code-lang">' + lang + '</span>' : '<span class="code-lang"></span>';
+          var btns = '<div class="code-btn-group"><button class="code-btn" onclick="copyCode(' + SQ + id + SQ + ')">Copy</button><button class="code-btn" onclick="applyCode(' + SQ + id + SQ + ')">Apply</button></div>';
+          return '<div class="code-block-wrap"><div class="code-block-toolbar">' + langLabel + btns + '</div><pre id="' + id + '"><code>' + code + '</code></pre></div>';
+        })
+        .replace(re1,'<code>$1</code>').replace(/[*][*](.*?)[*][*]/g,'<strong>$1</strong>').replace(/[*](.*?)[*]/g,'<em>$1</em>');
     }
+    function copyCode(id) {
+      const el = document.getElementById(id); if (!el) return;
+      const code = el.textContent || '';
+      navigator.clipboard.writeText(code).catch(() => { vscode.postMessage({ type: 'copyToClipboard', text: code }); });
+      const wrap = el.closest('.code-block-wrap'); const btn = wrap ? wrap.querySelector('.code-btn-group button:first-child') : null;
+      if (btn) { const orig = btn.textContent; btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = orig; }, 1200); }
+    }
+    function applyCode(id) { const el = document.getElementById(id); if (!el) return; vscode.postMessage({ type: 'applyCode', code: el.textContent || '' }); }
     function sendMessage() {
       const text = inputEl.value.trim(); if (!text || isStreaming) return;
       if (text === '/clear') { inputEl.value = ''; autoResize(); vscode.postMessage({ type: 'clear' }); return; }
+      if (text === '/model') { inputEl.value = ''; autoResize(); vscode.postMessage({ type: 'selectModel' }); return; }
+      if (text === '/compress') { inputEl.value = ''; autoResize(); vscode.postMessage({ type: 'compress' }); return; }
+      if (text === '/help') {
+        inputEl.value = ''; autoResize();
+        appendMessage('assistant', 'Available commands:\n  /clear    — clear conversation\n  /model    — switch model\n  /compress — summarize history\n  /help     — show this help\n\n@file:path to include a file as context.\nCode blocks have Copy and Apply buttons.');
+        return;
+      }
       inputEl.value = ''; autoResize(); vscode.postMessage({ type: 'send', text });
     }
     function autoResize() { inputEl.style.height = 'auto'; inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px'; }
@@ -1257,6 +1455,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case 'toolNote': { const nd = document.createElement('div'); nd.className = 'tool-note-msg'; nd.textContent = msg.text; messagesEl.appendChild(nd); messagesEl.scrollTop = messagesEl.scrollHeight; break; }
         case 'connectionStatus': updateConnectionStatus(msg.connected); updateModel(msg.model); break;
         case 'modelChanged': updateModel(msg.model); break;
+        case 'compressStart': appendMessage('assistant', '🗜 Compressing conversation history…'); break;
+        case 'compressed': appendMessage('assistant', '✅ History compressed. ' + (msg.summary || 'Context is now shorter.')); break;
       }
     });
   </script>
