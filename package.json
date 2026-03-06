@@ -72,6 +72,11 @@
         "icon": "$(debug-restart)"
       },
       {
+        "command": "sagellm.restartEmbedding",
+        "title": "SageCoder: Restart Embedding Server",
+        "icon": "$(symbol-numeric)"
+      },
+      {
         "command": "sagellm.showInstallGuide",
         "title": "SageCoder: Installation Guide",
         "icon": "$(book)"
@@ -358,6 +363,21 @@
           "default": 6000,
           "minimum": 1000,
           "description": "Maximum total tokens kept in chat history. Oldest turns are automatically pruned to stay within this budget, keeping the system prompt and the most recent 6 messages."
+        },
+        "sagellm.embeddings.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the sagellm embedding server on activation (required for semantic code search)."
+        },
+        "sagellm.embeddings.port": {
+          "type": "number",
+          "default": 8090,
+          "description": "Port for the sagellm embedding server (sagellm embedding serve)."
+        },
+        "sagellm.embeddings.model": {
+          "type": "string",
+          "default": "",
+          "description": "Embedding model ID or local path. Leave empty to auto-select the smallest cached model (BAAI/bge-small-en-v1.5 recommended)."
         }
       }
     }

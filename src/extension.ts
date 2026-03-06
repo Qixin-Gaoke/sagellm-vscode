@@ -9,6 +9,8 @@ import {
   promptAndStartServer,
   MODEL_CATALOG,
   isModelDownloadInProgress,
+  autoStartEmbeddingServer,
+  restartEmbeddingServer,
 } from "./serverLauncher";
 import { DEFAULT_GATEWAY_PORT } from "./sagePorts";
 import {
@@ -113,6 +115,11 @@ export async function activate(
     vscode.commands.registerCommand("sagellm.stopGateway", () =>
       stopGateway(statusBar!)
     ),
+
+    vscode.commands.registerCommand("sagellm.restartEmbedding", async () => {
+      vscode.window.setStatusBarMessage("SageCoder: Restarting embedding server…", 4000);
+      await restartEmbeddingServer();
+    }),
 
     vscode.commands.registerCommand("sagellm.restartGateway", async () => {
       // Close any existing SageCoder terminals to avoid duplicates
@@ -327,7 +334,11 @@ export async function activate(
         }
         // Gateway reconnected — reset FIM endpoint availability cache so the
         // inline provider re-probes /v1/completions on the next keystroke.
-        if (modelLoaded) { inlineProvider.resetCache(); }
+        if (modelLoaded) {
+          inlineProvider.resetCache();
+          // Also (re-)ensure the embedding server is up now that main gateway is healthy
+          autoStartEmbeddingServer().catch(() => { /* non-fatal */ });
+        }
       } catch {
         // gateway healthy but model fetch failed — non-fatal
       }
@@ -368,6 +379,10 @@ export async function activate(
     }, delay);
   }
   scheduleRetryConnect();
+
+  // ── Auto-start embedding server (non-blocking, runs in background) ─────────
+  // Delayed by 5s so it doesn't compete with the main gateway startup.
+  setTimeout(() => autoStartEmbeddingServer(), 5_000);
 
   // ── Background package version check (throttled to once per day) ──────────
   // 90s delay so it doesn't run during the critical startup path

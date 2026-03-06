@@ -5,11 +5,12 @@
 import * as vscode from "vscode";
 import * as cp from "child_process";
 import * as fs from "fs";
+import * as http from "http";
 import * as path from "path";
 import * as os from "os";
 import { checkHealth, fetchModels } from "./gatewayClient";
 import { StatusBarManager } from "./statusBar";
-import { DEFAULT_GATEWAY_PORT } from "./sagePorts";
+import { DEFAULT_GATEWAY_PORT, DEFAULT_EMBEDDING_PORT } from "./sagePorts";
 import { isModelDownloadCorrupt, offerRepairIfCorrupt } from "./diagnostics";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -879,3 +880,153 @@ export async function promptAndStartServer(
   }, 3000);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Embedding server auto-start
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Small embedding models suitable for local code semantic search.
+ * Ordered by preference: smallest first so the default auto-pick is fast.
+ */
+const EMBEDDING_CATALOG = [
+  { id: "BAAI/bge-small-en-v1.5",    size: "~33 MB",  desc: "Tiny English embedding, fastest startup" },
+  { id: "BAAI/bge-small-zh-v1.5",    size: "~95 MB",  desc: "Tiny Chinese+English embedding" },
+  { id: "sentence-transformers/all-MiniLM-L6-v2", size: "~90 MB", desc: "Multilingual, widely used" },
+  { id: "BAAI/bge-base-en-v1.5",     size: "~440 MB", desc: "Base English embedding, higher quality" },
+  { id: "BAAI/bge-m3",               size: "~570 MB", desc: "Multilingual, top quality" },
+];
+
+let _embeddingTerminal: vscode.Terminal | undefined;
+/** Tracks whether we've already shown the one-time download suggestion. */
+let _embeddingSuggestionShown = false;
+
+/**
+ * Check whether a sagellm embedding server is responding at the given port.
+ */
+export async function checkEmbeddingHealth(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = http.request(
+      { hostname: "localhost", port, path: "/health", method: "GET", timeout: 2000 },
+      (res) => { resolve(res.statusCode === 200); }
+    );
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => { req.destroy(); resolve(false); });
+    req.end();
+  });
+}
+
+/**
+ * Auto-start the embedding server if:
+ *  1. It is not already running at the configured port.
+ *  2. At least one embedding model is locally cached.
+ *
+ * If no model is cached, shows a one-time non-modal notification offering
+ * to download a small embedding model.
+ *
+ * Designed to be called fire-and-forget at extension activation and after
+ * the main gateway becomes healthy.
+ */
+export async function autoStartEmbeddingServer(): Promise<void> {
+  const cfg  = vscode.workspace.getConfiguration("sagellm");
+  const autoStart = cfg.get<boolean>("embeddings.autoStart", true);
+  if (!autoStart) return;
+
+  const port  = cfg.get<number>("embeddings.port",  DEFAULT_EMBEDDING_PORT);
+  const model = cfg.get<string>("embeddings.model", "").trim();
+
+  // 1. Already healthy?  ─────────────────────────────────────────────────────
+  if (await checkEmbeddingHealth(port)) return;
+
+  // 2. Find which model to use ───────────────────────────────────────────────
+  let chosenModel: string | undefined;
+
+  if (model && isModelDownloaded(model)) {
+    // User-configured model is available
+    chosenModel = model;
+  } else {
+    // Auto-pick: first catalog entry that is already downloaded
+    chosenModel = EMBEDDING_CATALOG.find((m) => isModelDownloaded(m.id))?.id;
+  }
+
+  // 3. No model cached — offer to download once ─────────────────────────────
+  if (!chosenModel) {
+    if (_embeddingSuggestionShown) return;
+    _embeddingSuggestionShown = true;
+
+    const rec = EMBEDDING_CATALOG[0]; // smallest recommendation
+    const choice = await vscode.window.showInformationMessage(
+      `SageCoder: 下载一个小型本地 embedding 模型（${rec.id}，${rec.size}）可启用语义代码搜索。`,
+      "下载 & 启动",
+      "选择其他",
+      "以后再说",
+    );
+
+    if (choice === "以后再说" || choice === undefined) return;
+
+    if (choice === "选择其他") {
+      const items = EMBEDDING_CATALOG.map((m) => ({
+        label: m.id,
+        description: `${m.size} · ${m.desc}`,
+        detail: m.id,
+      }));
+      const picked = await vscode.window.showQuickPick(items, {
+        title: "SageCoder: 选择 Embedding 模型",
+        placeHolder: "较小的模型启动更快，适合本地 CPU 推理",
+      });
+      if (!picked) return;
+      chosenModel = picked.detail!;
+    } else {
+      chosenModel = rec.id;
+    }
+
+    // Download the selected model (reuse existing download flow)
+    const ok = await downloadModel(chosenModel);
+    if (!ok) return;
+  }
+
+  // 4. Launch the embedding server ───────────────────────────────────────────
+  _launchEmbeddingTerminal(chosenModel, port);
+
+  // 5. Update config with the chosen model so future activations remember it
+  await cfg.update("embeddings.model", chosenModel, vscode.ConfigurationTarget.Global);
+
+  // 6. Poll until healthy (up to 90 s — small models load in 5–20 s) ─────────
+  let attempts = 0;
+  const poll = setInterval(async () => {
+    attempts++;
+    if (await checkEmbeddingHealth(port)) {
+      clearInterval(poll);
+      vscode.window.setStatusBarMessage(`SageCoder: Embedding server ready ✓  (${chosenModel})`, 6000);
+    } else if (attempts >= 30) {
+      clearInterval(poll);
+      vscode.window.showWarningMessage(
+        `SageCoder: Embedding server (${chosenModel}) did not become healthy after 90 s.`,
+        "Show Terminal"
+      ).then((c) => { if (c === "Show Terminal") _embeddingTerminal?.show(); });
+    }
+  }, 3000);
+}
+
+function _launchEmbeddingTerminal(model: string, port: number): void {
+  // Dispose any stale terminal first
+  try { _embeddingTerminal?.dispose(); } catch { /* ignore */ }
+
+  const cmd = `sagellm embedding serve --model ${model} --port ${port}`;
+  _embeddingTerminal = vscode.window.createTerminal({
+    name: "SageCoder Embedding",
+    isTransient: false,
+    // Hidden by default — user can reveal via "Show Terminal" in the warning
+  });
+  _embeddingTerminal.sendText(cmd);
+  // Don't call .show() — keep it background so it doesn't grab focus
+}
+
+/**
+ * Called by extension.ts to gracefully restart the embedding server after
+ * the user explicitly triggers a refresh (e.g. sagellm.restartEmbedding).
+ */
+export async function restartEmbeddingServer(): Promise<void> {
+  try { _embeddingTerminal?.dispose(); } catch { /* ignore */ }
+  _embeddingTerminal = undefined;
+  await autoStartEmbeddingServer();
+}
