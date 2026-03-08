@@ -39,8 +39,13 @@
     "commands": [
       {
         "command": "sagellm.openChat",
-        "title": "SageLLM: Open Chat",
+        "title": "SageLLM: Open Sidebar Chat",
         "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "sagellm.openDebugLogs",
+        "title": "SageLLM: Open Debug Logs",
+        "icon": "$(output)"
       },
       {
         "command": "sagellm.selectModel",
@@ -159,6 +164,11 @@
         {
           "command": "sagellm.refreshModels",
           "when": "view == sagellm.modelsView",
+          "group": "navigation"
+        },
+        {
+          "command": "sagellm.openDebugLogs",
+          "when": "view == sagellm.modelsView || view == sagellm.chatView",
           "group": "navigation"
         }
       ]

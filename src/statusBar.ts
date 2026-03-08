@@ -10,7 +10,7 @@ export class StatusBarManager {
       vscode.StatusBarAlignment.Right,
       100
     );
-    this.statusBar.command = "sagellm.openChat";
+    this.statusBar.command = "sagellm.showInstallGuide";
     this.update();
     this.statusBar.show();
   }
@@ -33,7 +33,7 @@ export class StatusBarManager {
 
   setError(message: string): void {
     this.statusBar.text = "$(error) SageLLM";
-    this.statusBar.tooltip = `SageLLM: ${message}\nClick to open chat`;
+    this.statusBar.tooltip = `SageLLM: ${message}\nClick to open setup and configuration`;
     this.statusBar.backgroundColor = new vscode.ThemeColor(
       "statusBarItem.errorBackground"
     );
@@ -43,14 +43,14 @@ export class StatusBarManager {
     if (!this.gatewayRunning) {
       this.statusBar.text = "$(circle-slash) SageLLM";
       this.statusBar.tooltip =
-        "sagellm-gateway not connected — click to open chat and check status";
+        "sagellm-gateway not connected — click to open setup and configuration";
       this.statusBar.backgroundColor = new vscode.ThemeColor(
         "statusBarItem.warningBackground"
       );
     } else {
       const model = this.currentModel ? ` (${this.currentModel})` : "";
       this.statusBar.text = `$(hubot) SageLLM${model}`;
-      this.statusBar.tooltip = `sagellm-gateway connected${model}\nClick to open chat`;
+      this.statusBar.tooltip = `sagellm-gateway connected${model}\nClick to open setup and configuration`;
       this.statusBar.backgroundColor = undefined;
     }
   }

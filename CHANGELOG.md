@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Standalone chat panel restored**: The right-bottom or command-triggered `openChat` panel no longer reuses the sidebar webview view type. The standalone panel now uses its own panel-only `viewType`, which avoids host conflicts with the working sidebar chat view.
+- **Sidebar chat is now the primary conversation surface**: `SageLLM: Open Chat` now reveals the working sidebar chat instead of opening the fragile standalone panel, and the status-bar click opens the setup/configuration panel instead of the broken standalone chat window.
+- **Setup panel is now actionable**: The status-bar panel is no longer a README-style page. It now shows current gateway/model settings and exposes direct actions for checking connection, opening settings, configuring the server, selecting a model, opening sidebar chat, and viewing debug logs.
+- **Chat bootstrap flow hardened**: Sidebar and standalone chat now share a single TypeScript controller and a single HTML/script builder, and model-restore retries are cancelable and generation-scoped so later UI changes are less likely to break initialization.
+
+### Added
+- **Debug output channel restored**: `SageLLM Debug` and `SageLLM: Open Debug Logs` are available again for extension-side tracing while we reintroduce features incrementally.
+
 ## [0.1.12] — 2026-03-05
 
 ### Fixed

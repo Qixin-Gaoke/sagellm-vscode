@@ -7,6 +7,7 @@ import { StatusBarManager } from "./statusBar";
 import { checkHealth, GatewayConnectionError } from "./gatewayClient";
 import { promptAndStartServer } from "./serverLauncher";
 import { DEFAULT_GATEWAY_PORT } from "./sagePorts";
+import { logDebug, registerDebugChannel, showDebugChannel } from "./debugLog";
 
 let gatewayProcess: cp.ChildProcess | null = null;
 let statusBar: StatusBarManager | null = null;
@@ -15,6 +16,9 @@ let healthCheckInterval: ReturnType<typeof setInterval> | null = null;
 export async function activate(
   context: vscode.ExtensionContext
 ): Promise<void> {
+  registerDebugChannel(context);
+  logDebug("extension", "activate start");
+
   // ── Core managers ──────────────────────────────────────────────────────────
   const modelManager = new ModelManager(context);
   statusBar = new StatusBarManager();
@@ -49,14 +53,14 @@ export async function activate(
 
   // ── Register commands ──────────────────────────────────────────────────────
   context.subscriptions.push(
-    vscode.commands.registerCommand("sagellm.openChat", () => {
-      const editor = vscode.window.activeTextEditor;
-      const selectedText = editor?.document.getText(editor.selection) ?? "";
-      ChatPanel.createOrShow(
-        context.extensionUri,
-        modelManager,
-        selectedText || undefined
-      );
+    vscode.commands.registerCommand("sagellm.openChat", async () => {
+      logDebug("extension", "openChat command -> reveal sidebar chat");
+      await revealSidebarChat();
+    }),
+
+    vscode.commands.registerCommand("sagellm.openDebugLogs", () => {
+      logDebug("extension", "openDebugLogs command");
+      showDebugChannel(false);
     }),
 
     vscode.commands.registerCommand("sagellm.selectModel", async () => {
@@ -126,6 +130,7 @@ export async function activate(
     }),
 
     vscode.commands.registerCommand("sagellm.showInstallGuide", () => {
+      logDebug("extension", "showInstallGuide command");
       showInstallGuide(context.extensionUri);
     }),
 
@@ -196,6 +201,7 @@ export async function activate(
     }),
 
     vscode.commands.registerCommand("sagellm.checkConnection", async () => {
+      logDebug("extension", "checkConnection command", { currentModel: modelManager.currentModel });
       statusBar?.setConnecting();
       const healthy = await checkHealth();
       statusBar?.setGatewayStatus(healthy);
@@ -408,25 +414,54 @@ function stopGateway(sb: StatusBarManager | null): void {
   sb?.setGatewayStatus(false);
 }
 
+async function revealSidebarChat(): Promise<void> {
+  try {
+    await vscode.commands.executeCommand("workbench.view.extension.sagellm-sidebar");
+  } catch {
+    // Best effort: some VS Code builds may not expose the generated container command.
+  }
+  try {
+    await vscode.commands.executeCommand("sagellm.chatView.focus");
+  } catch {
+    // Best effort: fallback still reveals the sidebar container.
+  }
+}
+
 // ── Install guide ─────────────────────────────────────────────────────────────
 
 function showInstallGuide(_extensionUri: vscode.Uri): void {
+  const cfg = vscode.workspace.getConfiguration("sagellm");
+  const host = cfg.get<string>("gateway.host", "localhost");
+  const port = cfg.get<number>("gateway.port", DEFAULT_GATEWAY_PORT);
+  const model = cfg.get<string>("model", "").trim() || cfg.get<string>("preloadModel", "").trim() || "Auto";
+  const autoStart = cfg.get<boolean>("autoStartGateway", true);
   const panel = vscode.window.createWebviewPanel(
     "sagellm.installGuide",
-    "SageLLM: Installation Guide",
+    "SageLLM: Setup & Configuration",
     vscode.ViewColumn.One,
-    { enableScripts: false }
+    { enableScripts: false, enableCommandUris: true }
   );
-  panel.webview.html = getInstallGuideHtml();
+  panel.webview.html = getInstallGuideHtml({ host, port, model, autoStart });
 }
 
-function getInstallGuideHtml(): string {
+function getInstallGuideHtml(config: {
+  host: string;
+  port: number;
+  model: string;
+  autoStart: boolean;
+}): string {
+  const openSettingsHref = "command:workbench.action.openSettings?%22@ext:intellistream.sagellm-vscode%22";
+  const checkConnectionHref = "command:sagellm.checkConnection";
+  const configureServerHref = "command:sagellm.configureServer";
+  const selectModelHref = "command:sagellm.selectModel";
+  const openSidebarChatHref = "command:sagellm.openChat";
+  const openDebugLogsHref = "command:sagellm.openDebugLogs";
   return /* html */ `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SageLLM Installation Guide</title>
+  <title>SageLLM Setup and Configuration</title>
   <style>
     body {
       font-family: var(--vscode-font-family); font-size: var(--vscode-font-size);
@@ -449,6 +484,55 @@ function getInstallGuideHtml(): string {
       border: 1px solid var(--vscode-panel-border);
       border-radius: 8px; padding: 14px 16px;
     }
+    .hero {
+      display: grid;
+      grid-template-columns: 1.4fr 1fr;
+      gap: 16px;
+      margin: 20px 0 24px;
+    }
+    .card {
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 10px;
+      padding: 16px;
+      background: var(--vscode-editor-background);
+    }
+    .card h3 {
+      margin: 0 0 10px;
+      font-size: 14px;
+    }
+    .kv {
+      display: grid;
+      grid-template-columns: 110px 1fr;
+      gap: 8px;
+      font-size: 12px;
+      margin-bottom: 8px;
+    }
+    .kv .label {
+      color: var(--vscode-descriptionForeground);
+    }
+    .actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .action {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 38px;
+      text-decoration: none;
+      border-radius: 8px;
+      border: 1px solid var(--vscode-panel-border);
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      font-weight: 600;
+      padding: 0 12px;
+    }
+    .action.secondary {
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+    }
     .step-num {
       width: 28px; height: 28px; border-radius: 50%;
       background: var(--vscode-button-background);
@@ -466,8 +550,33 @@ function getInstallGuideHtml(): string {
   </style>
 </head>
 <body>
-  <h1>🚀 SageLLM Setup Guide</h1>
-  <p>Follow these steps to install SageLLM and connect this extension to it.</p>
+  <h1>🚀 SageLLM Setup & Configuration</h1>
+  <p>Use the sidebar Chat view for conversation. This panel is the operational surface for configuration, connection checks, model selection, and debugging.</p>
+
+  <div class="hero">
+    <div class="card">
+      <h3>Current Configuration</h3>
+      <div class="kv"><div class="label">Gateway</div><div><code>${config.host}:${config.port}</code></div></div>
+      <div class="kv"><div class="label">Model</div><div><code>${config.model}</code></div></div>
+      <div class="kv"><div class="label">Auto Start</div><div><code>${config.autoStart ? "Enabled" : "Disabled"}</code></div></div>
+      <div class="actions">
+        <a class="action" href="${checkConnectionHref}">Check Connection</a>
+        <a class="action secondary" href="${openSettingsHref}">Open Settings</a>
+        <a class="action secondary" href="${configureServerHref}">Configure & Start</a>
+        <a class="action secondary" href="${selectModelHref}">Select Model</a>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Quick Access</h3>
+      <div class="actions">
+        <a class="action" href="${openSidebarChatHref}">Open Sidebar Chat</a>
+        <a class="action secondary" href="${openDebugLogsHref}">Open Debug Logs</a>
+      </div>
+      <div class="note" style="margin-top: 12px;">
+        The standalone chat panel remains disabled on purpose. Sidebar chat is the supported conversation path while we reintroduce features incrementally.
+      </div>
+    </div>
+  </div>
 
   <h2>Prerequisites</h2>
   <div class="step">
@@ -521,8 +630,7 @@ pip install -e .[dev]</code></pre>
   <div class="step">
     <div class="step-num">5</div>
     <div>
-      Click the <strong>⚡ SageLLM</strong> item in the status bar, or run the command<br/>
-      <strong>SageLLM: Check Connection</strong> to verify everything is working.
+      Use the <strong>SageLLM</strong> sidebar Chat view for conversation, and use the quick actions above to verify connectivity, select a model, or open extension settings.
     </div>
   </div>
 

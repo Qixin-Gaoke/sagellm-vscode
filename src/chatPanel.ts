@@ -13,14 +13,14 @@ import {
   resolveAtMentions,
 } from "./workspaceContext";
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Shared tool-calling loop (used by both ChatPanel and ChatViewProvider)
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 type PostMessage = (msg: Record<string, unknown>) => void;
 
 /**
- * Run the full agentic chat:  user message → [tool calls] → final streaming answer.
+ * Run the full agentic chat:  user message -> [tool calls] -> final streaming answer.
  *
  * 1. Resolves @file mentions in the user text.
  * 2. Optionally injects the active editor's file content into context.
@@ -72,8 +72,8 @@ async function runAgenticChat(
         tools: WORKSPACE_TOOLS,
         tool_choice: "auto",
       });
-      finishReason  = result.finishReason;
-      assistantMsg  = result.message;
+      finishReason = result.finishReason;
+      assistantMsg = result.message;
     } catch {
       // If tool-calling returns an error (model doesn't support tools),
       // fall back to plain streaming without tools.
@@ -87,10 +87,13 @@ async function runAgenticChat(
         if (abortSignal.aborted) break;
 
         let args: Record<string, unknown> = {};
-        try { args = JSON.parse(tc.function.arguments); } catch { /* ignore */ }
+        try {
+          args = JSON.parse(tc.function.arguments);
+        } catch {
+          // ignore
+        }
 
         postMsg({ type: "toolCall", tool: tc.function.name, args: tc.function.arguments });
-
         const result = await executeTool(tc.function.name, args);
 
         history.push({
@@ -104,7 +107,7 @@ async function runAgenticChat(
       continue;
     }
 
-    // finish_reason === "stop" → we have the final answer.
+    // finish_reason === "stop" -> we have the final answer.
     // If the model returned content directly (non-streaming path), emit it.
     if (assistantMsg.content) {
       postMsg({ type: "assistantStart" });
@@ -141,10 +144,9 @@ async function runAgenticChat(
   return fullResponse;
 }
 
-
 export class ChatPanel {
   public static currentPanel: ChatPanel | undefined;
-  private static readonly viewType = "sagellm.chatView";
+  private static readonly viewType = "sagellm.chatPanel";
 
   private readonly panel: vscode.WebviewPanel;
   private readonly extensionUri: vscode.Uri;
@@ -226,7 +228,7 @@ export class ChatPanel {
           await this.modelManager.setModel(models[0].id);
           modelReady = true;
         }
-        // models.length === 0 → gateway up but model still loading;
+        // models.length === 0 -> gateway up but model still loading;
         // scheduleModelRestore() below will keep retrying.
       } catch {
         // non-fatal
@@ -270,7 +272,9 @@ export class ChatPanel {
           if (models.length > 0) {
             await this.modelManager.setModel(models[0].id);
           }
-        } catch { /* non-fatal */ }
+        } catch {
+          /* non-fatal */
+        }
       }
       const model = this.modelManager.currentModel;
       if (model) {
@@ -375,16 +379,18 @@ export class ChatPanel {
     }
 
     const cfg = vscode.workspace.getConfiguration("sagellm");
-    const maxTokens   = cfg.get<number>("chat.maxTokens", 2048);
+    const maxTokens = cfg.get<number>("chat.maxTokens", 2048);
     const temperature = cfg.get<number>("chat.temperature", 0.7);
-    const useContext  = cfg.get<boolean>("chat.workspaceContext", true);
+    const useContext = cfg.get<boolean>("chat.workspaceContext", true);
 
     this.panel.webview.postMessage({ type: "userMessage", text: userText });
     this.abortController = new AbortController();
 
     try {
       await runAgenticChat(
-        userText, this.history, model,
+        userText,
+        this.history,
+        model,
         (msg) => this.panel.webview.postMessage(msg),
         this.abortController.signal,
         { maxTokens, temperature, useContext }
@@ -416,7 +422,7 @@ export class ChatPanel {
       overflow: hidden;
     }
 
-    /* ── header ── */
+    /* -- header -- */
     #header {
       display: flex;
       align-items: center;
@@ -453,7 +459,7 @@ export class ChatPanel {
     }
     .icon-btn:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
 
-    /* ── messages ── */
+    /* -- messages -- */
     #messages {
       flex: 1;
       overflow-y: auto;
@@ -515,7 +521,7 @@ export class ChatPanel {
     #welcome h2 { font-size: 16px; margin-bottom: 4px; }
     #welcome p { font-size: 12px; opacity: 0.7; }
 
-    /* ── input ── */
+    /* -- input -- */
     #input-area {
       padding: 10px 12px;
       border-top: 1px solid var(--vscode-panel-border);
@@ -564,7 +570,6 @@ export class ChatPanel {
     }
     .not-connected-banner.visible { display: block; }
     .not-connected-banner a { color: var(--vscode-textLink-foreground); cursor: pointer; }
-
     .tool-call-msg {
       display: flex; align-items: center; gap: 6px; font-size: 11px;
       color: var(--vscode-descriptionForeground); padding: 4px 8px;
@@ -677,7 +682,6 @@ export class ChatPanel {
       const roleEl = document.createElement('div');
       roleEl.className = 'msg-role';
       roleEl.textContent = role === 'user' ? 'You' : role === 'assistant' ? 'SageLLM' : 'Error';
-
       const body = document.createElement('div');
       body.className = 'msg-body';
 
@@ -884,10 +888,10 @@ function getNonce(): string {
 }
 
 /**
- * WebviewViewProvider for the SageLLM Chat **sidebar** view (sagellm.chatView).
+ * WebviewViewProvider for the SageLLM Chat sidebar view (sagellm.chatView).
  *
  * Provides the same chat interface as ChatPanel but embedded in the sidebar so
- * users don't need to run a separate command.  Both the sidebar view and the
+ * users don't need to run a separate command. Both the sidebar view and the
  * stand-alone panel share the same ModelManager so model selection is in sync.
  */
 export class ChatViewProvider implements vscode.WebviewViewProvider {
@@ -957,7 +961,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           await this.modelManager.setModel(models[0].id);
           modelReady = true;
         }
-      } catch { /* non-fatal */ }
+      } catch {
+        /* non-fatal */
+      }
     }
 
     this._view.webview.postMessage({
@@ -990,7 +996,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           if (models.length > 0) {
             await this.modelManager.setModel(models[0].id);
           }
-        } catch { /* non-fatal */ }
+        } catch {
+          /* non-fatal */
+        }
       }
       const model = this.modelManager.currentModel;
       if (model) {
@@ -1062,16 +1070,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     const cfg = vscode.workspace.getConfiguration("sagellm");
-    const maxTokens   = cfg.get<number>("chat.maxTokens", 2048);
+    const maxTokens = cfg.get<number>("chat.maxTokens", 2048);
     const temperature = cfg.get<number>("chat.temperature", 0.7);
-    const useContext  = cfg.get<boolean>("chat.workspaceContext", true);
+    const useContext = cfg.get<boolean>("chat.workspaceContext", true);
 
     this._view.webview.postMessage({ type: "userMessage", text: userText });
     this.abortController = new AbortController();
 
     try {
       await runAgenticChat(
-        userText, this.history, model,
+        userText,
+        this.history,
+        model,
         (msg) => this._view?.webview.postMessage(msg),
         this.abortController.signal,
         { maxTokens, temperature, useContext }
