@@ -2,27 +2,43 @@ import * as vscode from "vscode";
 import * as cp from "child_process";
 import { ModelManager, ModelsTreeProvider } from "./modelManager";
 import { ChatPanel, ChatViewProvider } from "./chatPanel";
-import { SageLLMInlineCompletionProvider } from "./inlineCompletion";
+import { SageCoderInlineCompletionProvider } from "./inlineCompletion";
 import { StatusBarManager } from "./statusBar";
 import { checkHealth, GatewayConnectionError } from "./gatewayClient";
-import { promptAndStartServer } from "./serverLauncher";
+import {
+  promptAndStartServer,
+  MODEL_CATALOG,
+  isModelDownloadInProgress,
+  autoStartEmbeddingServer,
+  restartEmbeddingServer,
+} from "./serverLauncher";
 import { DEFAULT_GATEWAY_PORT } from "./sagePorts";
-import { logDebug, registerDebugChannel, showDebugChannel } from "./debugLog";
+import {
+  checkPackagesIfDue,
+  runFullDiagnostics,
+  showDiagnosticsPanel,
+} from "./diagnostics";
+import { diffContentProvider } from "./diffEditor";
 
-let gatewayProcess: cp.ChildProcess | null = null;
+let activeGatewayTerminal: vscode.Terminal | null = null;
 let statusBar: StatusBarManager | null = null;
 let healthCheckInterval: ReturnType<typeof setInterval> | null = null;
 
 export async function activate(
   context: vscode.ExtensionContext
 ): Promise<void> {
-  registerDebugChannel(context);
-  logDebug("extension", "activate start");
-
   // ── Core managers ──────────────────────────────────────────────────────────
   const modelManager = new ModelManager(context);
   statusBar = new StatusBarManager();
   context.subscriptions.push(statusBar);
+
+  // ── Diff content provider (sagellm-diff:// virtual docs for diff view) ────
+  context.subscriptions.push(
+    vscode.workspace.registerTextDocumentContentProvider(
+      "sagellm-diff",
+      diffContentProvider
+    )
+  );
 
   // ── Sidebar chat view (sagellm.chatView) ─────────────────────────────────
   const chatViewProvider = new ChatViewProvider(context.extensionUri, modelManager);
@@ -43,7 +59,7 @@ export async function activate(
   context.subscriptions.push(treeView);
 
   // ── Inline completion ──────────────────────────────────────────────────────
-  const inlineProvider = new SageLLMInlineCompletionProvider(modelManager);
+  const inlineProvider = new SageCoderInlineCompletionProvider(modelManager);
   context.subscriptions.push(
     vscode.languages.registerInlineCompletionItemProvider(
       { pattern: "**" }, // all files
@@ -53,14 +69,14 @@ export async function activate(
 
   // ── Register commands ──────────────────────────────────────────────────────
   context.subscriptions.push(
-    vscode.commands.registerCommand("sagellm.openChat", async () => {
-      logDebug("extension", "openChat command -> reveal sidebar chat");
-      await revealSidebarChat();
-    }),
-
-    vscode.commands.registerCommand("sagellm.openDebugLogs", () => {
-      logDebug("extension", "openDebugLogs command");
-      showDebugChannel(false);
+    vscode.commands.registerCommand("sagellm.openChat", () => {
+      const editor = vscode.window.activeTextEditor;
+      const selectedText = editor?.document.getText(editor.selection) ?? "";
+      ChatPanel.createOrShow(
+        context.extensionUri,
+        modelManager,
+        selectedText || undefined
+      );
     }),
 
     vscode.commands.registerCommand("sagellm.selectModel", async () => {
@@ -71,17 +87,17 @@ export async function activate(
 
     vscode.commands.registerCommand("sagellm.refreshModels", async () => {
       await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: "SageLLM: Fetching models…", cancellable: false },
+        { location: vscode.ProgressLocation.Notification, title: "SageCoder: Fetching models…", cancellable: false },
         async () => {
           try {
             await modelManager.refresh();
             modelsProvider.refresh();
             vscode.window.showInformationMessage(
-              `SageLLM: ${modelManager.getModels().length} model(s) loaded`
+              `SageCoder: ${modelManager.getModels().length} model(s) loaded`
             );
           } catch (err) {
             vscode.window.showErrorMessage(
-              `SageLLM: ${err instanceof GatewayConnectionError ? err.message : String(err)}`
+              `SageCoder: ${err instanceof GatewayConnectionError ? err.message : String(err)}`
             );
           }
         }
@@ -100,10 +116,15 @@ export async function activate(
       stopGateway(statusBar!)
     ),
 
+    vscode.commands.registerCommand("sagellm.restartEmbedding", async () => {
+      vscode.window.setStatusBarMessage("SageCoder: Restarting embedding server…", 4000);
+      await restartEmbeddingServer();
+    }),
+
     vscode.commands.registerCommand("sagellm.restartGateway", async () => {
-      // Close any existing SageLLM terminals to avoid duplicates
+      // Close any existing SageCoder terminals to avoid duplicates
       for (const term of vscode.window.terminals) {
-        if (term.name.startsWith("SageLLM")) {
+        if (term.name.startsWith("SageCoder")) {
           term.dispose();
         }
       }
@@ -130,7 +151,6 @@ export async function activate(
     }),
 
     vscode.commands.registerCommand("sagellm.showInstallGuide", () => {
-      logDebug("extension", "showInstallGuide command");
       showInstallGuide(context.extensionUri);
     }),
 
@@ -140,7 +160,7 @@ export async function activate(
       if (!editor) return;
       const selection = editor.document.getText(editor.selection);
       if (!selection.trim()) {
-        vscode.window.showWarningMessage("SageLLM: Select some code first.");
+        vscode.window.showWarningMessage("SageCoder: Select some code first.");
         return;
       }
       const lang = editor.document.languageId;
@@ -157,7 +177,7 @@ export async function activate(
       if (!editor) return;
       const selection = editor.document.getText(editor.selection);
       if (!selection.trim()) {
-        vscode.window.showWarningMessage("SageLLM: Select a function or class first.");
+        vscode.window.showWarningMessage("SageCoder: Select a function or class first.");
         return;
       }
       const lang = editor.document.languageId;
@@ -173,7 +193,7 @@ export async function activate(
       if (!editor) return;
       const selection = editor.document.getText(editor.selection);
       if (!selection.trim()) {
-        vscode.window.showWarningMessage("SageLLM: Select the code to fix.");
+        vscode.window.showWarningMessage("SageCoder: Select the code to fix.");
         return;
       }
       const lang = editor.document.languageId;
@@ -189,7 +209,7 @@ export async function activate(
       if (!editor) return;
       const selection = editor.document.getText(editor.selection);
       if (!selection.trim()) {
-        vscode.window.showWarningMessage("SageLLM: Select a function or class.");
+        vscode.window.showWarningMessage("SageCoder: Select a function or class.");
         return;
       }
       const lang = editor.document.languageId;
@@ -200,8 +220,23 @@ export async function activate(
       );
     }),
 
+    vscode.commands.registerCommand("sagellm.runDiagnostics", async () => {
+      let result;
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: "SageCoder: 正在检测环境…",
+          cancellable: false,
+        },
+        async () => {
+          const modelIds = MODEL_CATALOG.map((m) => m.id);
+          result = await runFullDiagnostics(modelIds);
+        }
+      );
+      if (result) await showDiagnosticsPanel(result);
+    }),
+
     vscode.commands.registerCommand("sagellm.checkConnection", async () => {
-      logDebug("extension", "checkConnection command", { currentModel: modelManager.currentModel });
       statusBar?.setConnecting();
       const healthy = await checkHealth();
       statusBar?.setGatewayStatus(healthy);
@@ -210,14 +245,14 @@ export async function activate(
         modelsProvider.refresh();
         statusBar?.setModel(modelManager.currentModel);
         vscode.window.showInformationMessage(
-          "SageLLM: Gateway connected ✓"
+          "SageCoder: Gateway connected ✓"
         );
       } else {
         const cfg = vscode.workspace.getConfiguration("sagellm");
         const host = cfg.get("gateway.host", "localhost");
         const port = cfg.get("gateway.port", DEFAULT_GATEWAY_PORT);
         const choice = await vscode.window.showWarningMessage(
-          `SageLLM: Cannot reach gateway at ${host}:${port}`,
+          `SageCoder: Cannot reach gateway at ${host}:${port}`,
           "Start Gateway",
           "Installation Guide",
           "Open Settings"
@@ -297,6 +332,13 @@ export async function activate(
           ChatPanel.notifyModelChanged(modelManager.currentModel);
           ChatViewProvider.notifyModelChanged(modelManager.currentModel);
         }
+        // Gateway reconnected — reset FIM endpoint availability cache so the
+        // inline provider re-probes /v1/completions on the next keystroke.
+        if (modelLoaded) {
+          inlineProvider.resetCache();
+          // Also (re-)ensure the embedding server is up now that main gateway is healthy
+          autoStartEmbeddingServer().catch(() => { /* non-fatal */ });
+        }
       } catch {
         // gateway healthy but model fetch failed — non-fatal
       }
@@ -304,9 +346,9 @@ export async function activate(
       // so the caller retries later.
       return modelLoaded;
     } else {
-      if (showWarning) {
+      if (showWarning && !isModelDownloadInProgress()) {
         const choice = await vscode.window.showWarningMessage(
-          "SageLLM: Gateway not reachable. Configure and start now?",
+          "SageCoder: Gateway not reachable. Configure and start now?",
           "Configure Server",
           "Dismiss"
         );
@@ -322,11 +364,13 @@ export async function activate(
   // retrying with increasing delays until a model is available or we give up.
   let retryAttempt = 0;
   const maxRetries = 10; // up to ~5 min total
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  context.subscriptions.push({ dispose: () => { if (retryTimer) clearTimeout(retryTimer); } });
   async function scheduleRetryConnect(): Promise<void> {
     retryAttempt++;
     if (retryAttempt > maxRetries) return;
     const delay = Math.min(2000 * retryAttempt, 30_000); // 2s, 4s, 6s … 30s
-    setTimeout(async () => {
+    retryTimer = setTimeout(async () => {
       const showWarning = retryAttempt >= 3;
       const ok = await tryConnectAndRestoreModel(showWarning);
       if (!ok) {
@@ -335,6 +379,14 @@ export async function activate(
     }, delay);
   }
   scheduleRetryConnect();
+
+  // ── Auto-start embedding server (non-blocking, runs in background) ─────────
+  // Delayed by 5s so it doesn't compete with the main gateway startup.
+  setTimeout(() => autoStartEmbeddingServer(), 5_000);
+
+  // ── Background package version check (throttled to once per day) ──────────
+  // 90s delay so it doesn't run during the critical startup path
+  setTimeout(() => checkPackagesIfDue(context), 90_000);
 }
 
 export function deactivate(): void {
@@ -353,8 +405,8 @@ function startGateway(sb: StatusBarManager | null): void {
   const preloadModel = cfg.get<string>("preloadModel", "").trim();
   const backend = cfg.get<string>("backend", "").trim();
 
-  if (gatewayProcess && !gatewayProcess.killed) {
-    vscode.window.showInformationMessage("SageLLM: Gateway is already running");
+  if (activeGatewayTerminal) {
+    vscode.window.showInformationMessage("SageCoder: Gateway is already running");
     return;
   }
 
@@ -365,7 +417,7 @@ function startGateway(sb: StatusBarManager | null): void {
   cmd += ` --port ${port}`;
 
   const terminal = vscode.window.createTerminal({
-    name: "SageLLM Gateway",
+    name: "SageCoder Gateway",
     isTransient: false,
     // Disable preflight canary — it loads the model twice before the engine starts,
     // causing OOM on low-memory machines and extending startup by 2–10 minutes.
@@ -373,12 +425,13 @@ function startGateway(sb: StatusBarManager | null): void {
     // still verifies model output quality after the engine is healthy.
     env: { SAGELLM_PREFLIGHT_CANARY: "0" },
   });
+  activeGatewayTerminal = terminal;
   terminal.sendText(cmd);
   terminal.show(false);
 
   sb?.setConnecting();
   vscode.window.showInformationMessage(
-    `SageLLM: Starting gateway with "${cmd}"…`
+    `SageCoder: Starting gateway with "${cmd}"…`
   );
 
   // Poll until healthy (up to 5 min — model loading + engine startup can be slow)
@@ -390,78 +443,57 @@ function startGateway(sb: StatusBarManager | null): void {
     if (healthy) {
       clearInterval(poll);
       sb?.setGatewayStatus(true);
-      vscode.window.showInformationMessage("SageLLM: Gateway is ready ✓");
+      vscode.window.showInformationMessage("SageCoder: Gateway is ready ✓");
     } else if (attempts >= maxAttempts) {
       clearInterval(poll);
       sb?.setError("Gateway start timed out");
-      vscode.window.showWarningMessage(
-        "SageLLM: Gateway did not respond within 5 minutes. Check the terminal for errors."
-      );
+      vscode.window
+        .showWarningMessage(
+          "SageCoder: Gateway 5 分钟内未响应，请检查终端输出。",
+          "运行诊断",
+          "查看终端"
+        )
+        .then((choice) => {
+          if (choice === "运行诊断") {
+            vscode.commands.executeCommand("sagellm.runDiagnostics");
+          }
+        });
     } else if (attempts % 20 === 0) {
       // Show elapsed time every minute so user knows it's still loading
       const elapsed = Math.round(attempts * 3 / 60);
       sb?.setConnecting();
-      vscode.window.setStatusBarMessage(`SageLLM: Loading model… (${elapsed} min elapsed)`, 5000);
+      vscode.window.setStatusBarMessage(`SageCoder: Loading model… (${elapsed} min elapsed)`, 5000);
     }
   }, 3000);
 }
 
 function stopGateway(sb: StatusBarManager | null): void {
-  if (gatewayProcess && !gatewayProcess.killed) {
-    gatewayProcess.kill("SIGTERM");
-    gatewayProcess = null;
+  if (activeGatewayTerminal) {
+    activeGatewayTerminal.dispose();
+    activeGatewayTerminal = null;
   }
   sb?.setGatewayStatus(false);
-}
-
-async function revealSidebarChat(): Promise<void> {
-  try {
-    await vscode.commands.executeCommand("workbench.view.extension.sagellm-sidebar");
-  } catch {
-    // Best effort: some VS Code builds may not expose the generated container command.
-  }
-  try {
-    await vscode.commands.executeCommand("sagellm.chatView.focus");
-  } catch {
-    // Best effort: fallback still reveals the sidebar container.
-  }
 }
 
 // ── Install guide ─────────────────────────────────────────────────────────────
 
 function showInstallGuide(_extensionUri: vscode.Uri): void {
-  const cfg = vscode.workspace.getConfiguration("sagellm");
-  const host = cfg.get<string>("gateway.host", "localhost");
-  const port = cfg.get<number>("gateway.port", DEFAULT_GATEWAY_PORT);
-  const model = cfg.get<string>("model", "").trim() || cfg.get<string>("preloadModel", "").trim() || "Auto";
-  const autoStart = cfg.get<boolean>("autoStartGateway", true);
   const panel = vscode.window.createWebviewPanel(
     "sagellm.installGuide",
-    "SageLLM: Setup & Configuration",
+    "SageCoder: Installation Guide",
     vscode.ViewColumn.One,
-    { enableScripts: false, enableCommandUris: true }
+    { enableScripts: false }
   );
-  panel.webview.html = getInstallGuideHtml({ host, port, model, autoStart });
+  panel.webview.html = getInstallGuideHtml();
 }
 
-function getInstallGuideHtml(config: {
-  host: string;
-  port: number;
-  model: string;
-  autoStart: boolean;
-}): string {
-  const openSettingsHref = "command:workbench.action.openSettings?%22@ext:intellistream.sagellm-vscode%22";
-  const checkConnectionHref = "command:sagellm.checkConnection";
-  const configureServerHref = "command:sagellm.configureServer";
-  const selectModelHref = "command:sagellm.selectModel";
-  const openSidebarChatHref = "command:sagellm.openChat";
-  const openDebugLogsHref = "command:sagellm.openDebugLogs";
+function getInstallGuideHtml(): string {
   return /* html */ `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SageLLM Setup and Configuration</title>
+  <title>SageCoder Installation Guide</title>
   <style>
     body {
       font-family: var(--vscode-font-family); font-size: var(--vscode-font-size);
@@ -484,55 +516,6 @@ function getInstallGuideHtml(config: {
       border: 1px solid var(--vscode-panel-border);
       border-radius: 8px; padding: 14px 16px;
     }
-    .hero {
-      display: grid;
-      grid-template-columns: 1.4fr 1fr;
-      gap: 16px;
-      margin: 20px 0 24px;
-    }
-    .card {
-      border: 1px solid var(--vscode-panel-border);
-      border-radius: 10px;
-      padding: 16px;
-      background: var(--vscode-editor-background);
-    }
-    .card h3 {
-      margin: 0 0 10px;
-      font-size: 14px;
-    }
-    .kv {
-      display: grid;
-      grid-template-columns: 110px 1fr;
-      gap: 8px;
-      font-size: 12px;
-      margin-bottom: 8px;
-    }
-    .kv .label {
-      color: var(--vscode-descriptionForeground);
-    }
-    .actions {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-      margin-top: 12px;
-    }
-    .action {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 38px;
-      text-decoration: none;
-      border-radius: 8px;
-      border: 1px solid var(--vscode-panel-border);
-      background: var(--vscode-button-background);
-      color: var(--vscode-button-foreground);
-      font-weight: 600;
-      padding: 0 12px;
-    }
-    .action.secondary {
-      background: var(--vscode-button-secondaryBackground);
-      color: var(--vscode-button-secondaryForeground);
-    }
     .step-num {
       width: 28px; height: 28px; border-radius: 50%;
       background: var(--vscode-button-background);
@@ -550,33 +533,8 @@ function getInstallGuideHtml(config: {
   </style>
 </head>
 <body>
-  <h1>🚀 SageLLM Setup & Configuration</h1>
-  <p>Use the sidebar Chat view for conversation. This panel is the operational surface for configuration, connection checks, model selection, and debugging.</p>
-
-  <div class="hero">
-    <div class="card">
-      <h3>Current Configuration</h3>
-      <div class="kv"><div class="label">Gateway</div><div><code>${config.host}:${config.port}</code></div></div>
-      <div class="kv"><div class="label">Model</div><div><code>${config.model}</code></div></div>
-      <div class="kv"><div class="label">Auto Start</div><div><code>${config.autoStart ? "Enabled" : "Disabled"}</code></div></div>
-      <div class="actions">
-        <a class="action" href="${checkConnectionHref}">Check Connection</a>
-        <a class="action secondary" href="${openSettingsHref}">Open Settings</a>
-        <a class="action secondary" href="${configureServerHref}">Configure & Start</a>
-        <a class="action secondary" href="${selectModelHref}">Select Model</a>
-      </div>
-    </div>
-    <div class="card">
-      <h3>Quick Access</h3>
-      <div class="actions">
-        <a class="action" href="${openSidebarChatHref}">Open Sidebar Chat</a>
-        <a class="action secondary" href="${openDebugLogsHref}">Open Debug Logs</a>
-      </div>
-      <div class="note" style="margin-top: 12px;">
-        The standalone chat panel remains disabled on purpose. Sidebar chat is the supported conversation path while we reintroduce features incrementally.
-      </div>
-    </div>
-  </div>
+  <h1>🚀 SageCoder Setup Guide</h1>
+  <p>Follow these steps to install SageCoder and connect this extension to it.</p>
 
   <h2>Prerequisites</h2>
   <div class="step">
@@ -587,11 +545,11 @@ function getInstallGuideHtml(config: {
     </div>
   </div>
 
-  <h2>Install SageLLM</h2>
+  <h2>Install SageCoder</h2>
   <div class="step">
     <div class="step-num">2</div>
     <div>
-      Install the SageLLM meta-package from PyPI:<br/>
+      Install the SageCoder meta-package from PyPI:<br/>
       <pre><code>pip install isagellm</code></pre>
       Or install from source:<br/>
       <pre><code>git clone https://github.com/intellistream/sagellm
@@ -618,7 +576,7 @@ pip install -e .[dev]</code></pre>
   <div class="step">
     <div class="step-num">4</div>
     <div>
-      Open VS Code Settings (<code>Ctrl+,</code>) and search for <strong>SageLLM</strong>:
+      Open VS Code Settings (<code>Ctrl+,</code>) and search for <strong>SageCoder</strong>:
       <ul style="margin: 8px 0 0 16px;">
         <li><code>sagellm.gateway.host</code> — default: <code>localhost</code></li>
         <li><code>sagellm.gateway.port</code> — default: <code>8901</code> (<code>sagellm serve</code> default)</li>
@@ -630,7 +588,8 @@ pip install -e .[dev]</code></pre>
   <div class="step">
     <div class="step-num">5</div>
     <div>
-      Use the <strong>SageLLM</strong> sidebar Chat view for conversation, and use the quick actions above to verify connectivity, select a model, or open extension settings.
+      Click the <strong>⚡ SageCoder</strong> item in the status bar, or run the command<br/>
+      <strong>SageCoder: Check Connection</strong> to verify everything is working.
     </div>
   </div>
 
@@ -642,7 +601,7 @@ pip install -e .[dev]</code></pre>
 
   <h2>Resources</h2>
   <ul>
-    <li><a href="https://github.com/intellistream/sagellm">SageLLM GitHub</a></li>
+    <li><a href="https://github.com/intellistream/sagellm">SageCoder GitHub</a></li>
     <li><a href="https://github.com/intellistream/sagellm-vscode/issues">Report an issue</a></li>
   </ul>
 </body>
