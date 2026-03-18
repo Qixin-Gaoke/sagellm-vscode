@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+- `.gitignore` 现在默认忽略本地 `.env` / `.env.local` / `.env.*` 配置文件，同时保留 `.env.example` / `.env.template` 模板文件可提交，避免扩展开发时误提交本地凭证。
+- **Code block toolbar** — every code block in chat now has a toolbar with **Copy** and **Apply** buttons. Copy writes the code to the clipboard; Apply inserts it at the cursor in the active editor (or replaces the selection), or opens a new untitled document if no editor is active.
+- **`write_file` tool** — the AI can now propose writing/creating files. A modal approval dialog is shown before any write, with a note on whether the file already exists. The written file is automatically opened in the editor.
+- **`run_command` tool** — the AI can propose running shell commands. A modal approval dialog shows the command and working directory before execution. Output is returned to the model.
+- **Slash commands**: `/model` (switch model), `/compress` (summarize conversation history to save context), `/help` (show available commands). `/clear` was already supported.
+- **`/compress` context compression** — sends the current conversation to the model for summarization and replaces the history with the compressed summary, freeing up context window space for long sessions. Visual feedback shown in chat.
+- **Updated hint bar** — now shows `/help for commands` instead of `/clear to reset`.
+
+### Added (previous)
+- **Rename: SageLLM → SageCoder** — display name, activity bar title, status bar, chat panel, all command titles, and extension description updated to "SageCoder". Internal `sagellm.*` config keys and command IDs are unchanged.
+- **Extension description** updated to reflect code-generation-assistant positioning (inline completions, chat, explain/fix/test/docstring). Added `"Programming Languages"` VS Code category and `sagecoder`/`code generation`/`copilot` keywords.
+- **Default system prompt** updated: model now introduces itself as "SageCoder, an expert AI coding assistant".
+
 ### Fixed
 - **Standalone chat panel restored**: The right-bottom or command-triggered `openChat` panel no longer reuses the sidebar webview view type. The standalone panel now uses its own panel-only `viewType`, which avoids host conflicts with the working sidebar chat view.
 - **Sidebar chat is now the primary conversation surface**: `SageLLM: Open Chat` now reveals the working sidebar chat instead of opening the fragile standalone panel, and the status-bar click opens the setup/configuration panel instead of the broken standalone chat window.
