@@ -115,6 +115,11 @@
         "command": "sagellm.runDiagnostics",
         "title": "SageCoder: Run Diagnostics",
         "icon": "$(search)"
+      },
+      {
+        "command": "sagellm.runMigrationDiagnostics",
+        "title": "SageCoder: Run Migration Diagnostics",
+        "icon": "$(pulse)"
       }
     ],
     "viewsContainers": {

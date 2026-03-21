@@ -16,7 +16,9 @@ import { DEFAULT_GATEWAY_PORT } from "./sagePorts";
 import {
   checkPackagesIfDue,
   runFullDiagnostics,
+  runMigrationProtocolDiagnostics,
   showDiagnosticsPanel,
+  showMigrationProtocolDiagnostics,
 } from "./diagnostics";
 import { diffContentProvider } from "./diffEditor";
 
@@ -234,6 +236,32 @@ export async function activate(
         }
       );
       if (result) await showDiagnosticsPanel(result);
+    }),
+
+    vscode.commands.registerCommand("sagellm.runMigrationDiagnostics", async () => {
+      let model = modelManager.currentModel;
+      if (!model) {
+        model = (await modelManager.selectModelInteractive()) ?? "";
+      }
+      if (!model) {
+        vscode.window.showWarningMessage("SageCoder: Select a model before running migration diagnostics.");
+        return;
+      }
+
+      let report;
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: "SageCoder: collecting migration diagnostics…",
+          cancellable: false,
+        },
+        async () => {
+          report = await runMigrationProtocolDiagnostics(model!);
+        }
+      );
+      if (report) {
+        await showMigrationProtocolDiagnostics(report);
+      }
     }),
 
     vscode.commands.registerCommand("sagellm.checkConnection", async () => {

@@ -17,6 +17,7 @@
 import * as vscode from "vscode";
 import * as cp from "child_process";
 import * as fs from "fs";
+import * as http from "http";
 import * as path from "path";
 import * as os from "os";
 import * as https from "https";
@@ -314,6 +315,156 @@ export function upgradePackagesInTerminal(
   });
   term.sendText(`pip install -U ${names.join(" ")}`);
   term.show(true);
+}
+
+export interface MigrationProtocolDiagnostics {
+  generatedAt: string;
+  model: string;
+  negotiatedVersion: string | null;
+  versionMismatchReason: string | null;
+  completionsSupport: {
+    supported: boolean;
+    detail: string;
+  };
+  stream: import("./gatewayClient").StreamDiagnosticsReport;
+  counters: {
+    diagnosticEventTotal: number;
+    streamAbortCount: number;
+    versionMismatchCount: number;
+  };
+  infoPayload: Record<string, unknown> | null;
+}
+
+function getGatewayConfig() {
+  const cfg = vscode.workspace.getConfiguration("sagellm");
+  const host = cfg.get<string>("gateway.host", "localhost");
+  const port = cfg.get<number>("gateway.port", 8901);
+  const tls = cfg.get<boolean>("gateway.tls", false);
+  return { baseUrl: `${tls ? "https" : "http"}://${host}:${port}` };
+}
+
+async function requestGatewayJson(
+  pathName: string,
+  method: "GET" | "POST",
+  payload?: Record<string, unknown>
+): Promise<{ statusCode: number; payload: Record<string, unknown> | null; text: string }> {
+  const { baseUrl } = getGatewayConfig();
+  const cfg = vscode.workspace.getConfiguration("sagellm");
+  const apiKey = cfg.get<string>("gateway.apiKey", "");
+  const url = new URL(`${baseUrl}${pathName}`);
+  const lib = url.protocol === "https:" ? https : http;
+  const body = payload ? JSON.stringify(payload) : undefined;
+
+  return new Promise((resolve, reject) => {
+    const req = lib.request(
+      {
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname + url.search,
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+          ...(body ? { "Content-Length": Buffer.byteLength(body) } : {}),
+        },
+      },
+      (res) => {
+        let text = "";
+        res.on("data", (chunk) => (text += chunk.toString()));
+        res.on("end", () => {
+          try {
+            resolve({
+              statusCode: res.statusCode ?? 0,
+              payload: text ? (JSON.parse(text) as Record<string, unknown>) : null,
+              text,
+            });
+          } catch {
+            resolve({ statusCode: res.statusCode ?? 0, payload: null, text });
+          }
+        });
+      }
+    );
+
+    req.on("error", (err) => reject(err));
+    req.setTimeout(30000, () => {
+      req.destroy();
+      reject(new Error("Request timed out after 30s"));
+    });
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+export async function runMigrationProtocolDiagnostics(
+  model: string,
+  prompt = "请用一句话介绍 SageLLM 的 chat mainline。"
+): Promise<MigrationProtocolDiagnostics> {
+  const { collectStreamDiagnostics, rawTextCompletion } = await import("./gatewayClient");
+
+  let infoPayload: Record<string, unknown> | null = null;
+  try {
+    const infoResponse = await requestGatewayJson("/info", "GET");
+    infoPayload = infoResponse.payload;
+  } catch {
+    infoPayload = null;
+  }
+
+  const negotiatedVersion =
+    typeof infoPayload?.["schema_version"] === "string"
+      ? (infoPayload["schema_version"] as string)
+      : null;
+
+  const stream = await collectStreamDiagnostics({
+    model,
+    messages: [{ role: "user", content: prompt }],
+    max_tokens: 32,
+    temperature: 0,
+  });
+
+  let completionsSupport = {
+    supported: false,
+    detail: "not checked",
+  };
+  try {
+    await rawTextCompletion({ model, prompt, max_tokens: 16, temperature: 0 });
+    completionsSupport = { supported: true, detail: "non-stream completions request succeeded" };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    completionsSupport = {
+      supported: false,
+      detail: msg,
+    };
+  }
+
+  const versionMismatchReason = negotiatedVersion
+    ? null
+    : "Gateway /info did not expose schema_version; negotiation surface unavailable";
+
+  return {
+    generatedAt: new Date().toISOString(),
+    model,
+    negotiatedVersion,
+    versionMismatchReason,
+    completionsSupport,
+    stream,
+    counters: {
+      diagnosticEventTotal: stream.events.length,
+      streamAbortCount: stream.events.filter((event) => event.event === "error").length,
+      versionMismatchCount: versionMismatchReason ? 1 : 0,
+    },
+    infoPayload,
+  };
+}
+
+export async function showMigrationProtocolDiagnostics(
+  report: MigrationProtocolDiagnostics
+): Promise<void> {
+  const doc = await vscode.workspace.openTextDocument({
+    language: "json",
+    content: JSON.stringify(report, null, 2),
+  });
+  await vscode.window.showTextDocument(doc, { preview: false });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
