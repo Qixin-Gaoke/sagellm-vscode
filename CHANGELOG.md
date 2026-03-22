@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Added
+- 新增开发者预览命令 `SageCoder: Run Migration Diagnostics`：会抓取 gateway `/info`、执行一次 chat streaming 诊断并导出包含 `trace_id`、`request_id`、`engine_id`、流式事件序列、异常终止信息与 `/v1/completions` 支持状态的 JSON 报告，便于 clean-room 迁移联调。
+
+### Changed
+- `gatewayClient` 现可解析结构化 SSE 诊断字段（`event`、`trace_id`、`request_id`、`engine_id`、`error.code`），不再只把流式响应视为纯文本 delta。
+
+### Added
 - `.gitignore` 现在默认忽略本地 `.env` / `.env.local` / `.env.*` 配置文件，同时保留 `.env.example` / `.env.template` 模板文件可提交，避免扩展开发时误提交本地凭证。
 - **Code block toolbar** — every code block in chat now has a toolbar with **Copy** and **Apply** buttons. Copy writes the code to the clipboard; Apply inserts it at the cursor in the active editor (or replaces the selection), or opens a new untitled document if no editor is active.
 - **`write_file` tool** — the AI can now propose writing/creating files. A modal approval dialog is shown before any write, with a note on whether the file already exists. The written file is automatically opened in the editor.

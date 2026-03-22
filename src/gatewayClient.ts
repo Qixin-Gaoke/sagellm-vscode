@@ -35,11 +35,40 @@ export interface ChatCompletionChunk {
   id: string;
   object: string;
   model: string;
+  event?: string;
+  trace_id?: string;
+  request_id?: string;
+  engine_id?: string;
+  error?: {
+    message?: string;
+    code?: string;
+  };
   choices: Array<{
     delta: { role?: string; content?: string };
     finish_reason: string | null;
     index: number;
   }>;
+}
+
+export interface StreamDiagnosticEvent {
+  event: string;
+  traceId?: string;
+  requestId?: string;
+  engineId?: string;
+  finishReason?: string | null;
+  errorCode?: string;
+  errorMessage?: string;
+  contentDelta?: string;
+}
+
+export interface StreamDiagnosticsReport {
+  fullText: string;
+  traceId?: string;
+  requestId?: string;
+  engineId?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  events: StreamDiagnosticEvent[];
 }
 
 export interface ModelInfo {
@@ -117,6 +146,18 @@ function makeRequest(
     }
     req.end();
   });
+}
+
+export async function fetchGatewayInfo(): Promise<Record<string, unknown>> {
+  const { baseUrl, apiKey } = getConfig();
+  const { statusCode, data } = await makeRequest("GET", `${baseUrl}/info`, apiKey);
+  if (statusCode !== 200) {
+    throw new GatewayConnectionError(
+      `Gateway returned HTTP ${statusCode}: ${data}`,
+      statusCode
+    );
+  }
+  return JSON.parse(data) as Record<string, unknown>;
 }
 
 /** Fetch available models from sagellm-gateway /v1/models */
@@ -257,6 +298,140 @@ export async function streamChatCompletion(
       signal.addEventListener("abort", () => {
         req.destroy();
         resolve(fullText); // return whatever we got before abort
+      });
+    }
+
+    req.write(body);
+    req.end();
+  });
+}
+
+export async function collectStreamDiagnostics(
+  request: ChatCompletionRequest,
+  signal?: AbortSignal
+): Promise<StreamDiagnosticsReport> {
+  const { baseUrl, apiKey } = getConfig();
+  const body = JSON.stringify({ ...request, stream: true });
+
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("Aborted"));
+      return;
+    }
+
+    const parsed = new URL(`${baseUrl}/v1/chat/completions`);
+    const isHttps = parsed.protocol === "https:";
+    const lib = isHttps ? https : http;
+
+    const options: http.RequestOptions = {
+      hostname: parsed.hostname,
+      port: parsed.port,
+      path: parsed.pathname,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        "Content-Length": Buffer.byteLength(body),
+      },
+    };
+
+    let fullText = "";
+    let buffer = "";
+    const events: StreamDiagnosticEvent[] = [];
+    let traceId: string | undefined;
+    let requestId: string | undefined;
+    let engineId: string | undefined;
+    let errorCode: string | undefined;
+    let errorMessage: string | undefined;
+
+    const req = lib.request(options, (res) => {
+      if (res.statusCode !== 200) {
+        let errData = "";
+        res.on("data", (c) => (errData += c));
+        res.on("end", () =>
+          reject(
+            new GatewayConnectionError(
+              `Gateway returned HTTP ${res.statusCode}: ${errData}`,
+              res.statusCode
+            )
+          )
+        );
+        return;
+      }
+
+      res.on("data", (chunk: Buffer) => {
+        buffer += chunk.toString();
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed === "data: [DONE]") {
+            continue;
+          }
+          if (!trimmed.startsWith("data: ")) {
+            continue;
+          }
+
+          try {
+            const payload = JSON.parse(trimmed.slice(6)) as ChatCompletionChunk;
+            const choice = payload.choices?.[0];
+            const delta = choice?.delta?.content ?? "";
+            const event: StreamDiagnosticEvent = {
+              event: payload.event ?? "delta",
+              traceId: payload.trace_id,
+              requestId: payload.request_id,
+              engineId: payload.engine_id,
+              finishReason: choice?.finish_reason,
+              errorCode: payload.error?.code,
+              errorMessage: payload.error?.message,
+              contentDelta: delta || undefined,
+            };
+            events.push(event);
+            traceId = payload.trace_id ?? traceId;
+            requestId = payload.request_id ?? requestId;
+            engineId = payload.engine_id ?? engineId;
+            errorCode = payload.error?.code ?? errorCode;
+            errorMessage = payload.error?.message ?? errorMessage;
+
+            if (delta) {
+              fullText += delta;
+            }
+          } catch {
+            // ignore malformed SSE lines
+          }
+        }
+      });
+
+      res.on("end", () =>
+        resolve({
+          fullText,
+          traceId,
+          requestId,
+          engineId,
+          errorCode,
+          errorMessage,
+          events,
+        })
+      );
+      res.on("error", (err) =>
+        reject(new GatewayConnectionError(err.message))
+      );
+    });
+
+    req.on("error", (err) =>
+      reject(new GatewayConnectionError(`Network error: ${err.message}`))
+    );
+    req.setTimeout(120000, () => {
+      req.destroy();
+      reject(new GatewayConnectionError("Chat request timed out after 120s"));
+    });
+
+    if (signal) {
+      signal.addEventListener("abort", () => {
+        req.destroy();
+        resolve({ fullText, traceId, requestId, engineId, errorCode, errorMessage, events });
       });
     }
 

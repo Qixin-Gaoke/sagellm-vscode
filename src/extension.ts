@@ -5,11 +5,18 @@ import { ChatPanel, ChatViewProvider } from "./chatPanel";
 import { SageLLMInlineCompletionProvider } from "./inlineCompletion";
 import { StatusBarManager } from "./statusBar";
 import { checkHealth, GatewayConnectionError } from "./gatewayClient";
-import { promptAndStartServer } from "./serverLauncher";
+import { MODEL_CATALOG, promptAndStartServer } from "./serverLauncher";
 import { DEFAULT_GATEWAY_PORT } from "./sagePorts";
-import { logDebug, registerDebugChannel, showDebugChannel } from "./debugLog";
+import {
+  checkPackagesIfDue,
+  runFullDiagnostics,
+  runMigrationProtocolDiagnostics,
+  showDiagnosticsPanel,
+  showMigrationProtocolDiagnostics,
+} from "./diagnostics";
 
-let gatewayProcess: cp.ChildProcess | null = null;
+let activeGatewayTerminal: vscode.Terminal | null = null;
+import { logDebug, registerDebugChannel, showDebugChannel } from "./debugLog";
 let statusBar: StatusBarManager | null = null;
 let healthCheckInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -200,6 +207,47 @@ export async function activate(
       );
     }),
 
+    vscode.commands.registerCommand("sagellm.runDiagnostics", async () => {
+      let result;
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: "SageCoder: 正在检测环境…",
+          cancellable: false,
+        },
+        async () => {
+          const modelIds = MODEL_CATALOG.map((m) => m.id);
+          result = await runFullDiagnostics(modelIds);
+        }
+      );
+      if (result) await showDiagnosticsPanel(result);
+    }),
+
+    vscode.commands.registerCommand("sagellm.runMigrationDiagnostics", async () => {
+      let model = modelManager.currentModel;
+      if (!model) {
+        model = (await modelManager.selectModelInteractive()) ?? "";
+      }
+      if (!model) {
+        vscode.window.showWarningMessage("SageCoder: Select a model before running migration diagnostics.");
+        return;
+      }
+
+      let report;
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: "SageCoder: collecting migration diagnostics…",
+          cancellable: false,
+        },
+        async () => {
+          report = await runMigrationProtocolDiagnostics(model!);
+        }
+      );
+      if (report) {
+        await showMigrationProtocolDiagnostics(report);
+      }
+    }),
     vscode.commands.registerCommand("sagellm.checkConnection", async () => {
       logDebug("extension", "checkConnection command", { currentModel: modelManager.currentModel });
       statusBar?.setConnecting();
@@ -335,6 +383,9 @@ export async function activate(
     }, delay);
   }
   scheduleRetryConnect();
+
+  // Run lightweight background diagnostics at activation (throttled internally).
+  checkPackagesIfDue(context);
 }
 
 export function deactivate(): void {
@@ -353,7 +404,7 @@ function startGateway(sb: StatusBarManager | null): void {
   const preloadModel = cfg.get<string>("preloadModel", "").trim();
   const backend = cfg.get<string>("backend", "").trim();
 
-  if (gatewayProcess && !gatewayProcess.killed) {
+  if (activeGatewayTerminal) {
     vscode.window.showInformationMessage("SageLLM: Gateway is already running");
     return;
   }
@@ -375,6 +426,7 @@ function startGateway(sb: StatusBarManager | null): void {
   });
   terminal.sendText(cmd);
   terminal.show(false);
+  activeGatewayTerminal = terminal;
 
   sb?.setConnecting();
   vscode.window.showInformationMessage(
@@ -407,9 +459,9 @@ function startGateway(sb: StatusBarManager | null): void {
 }
 
 function stopGateway(sb: StatusBarManager | null): void {
-  if (gatewayProcess && !gatewayProcess.killed) {
-    gatewayProcess.kill("SIGTERM");
-    gatewayProcess = null;
+  if (activeGatewayTerminal) {
+    activeGatewayTerminal.dispose();
+    activeGatewayTerminal = null;
   }
   sb?.setGatewayStatus(false);
 }
