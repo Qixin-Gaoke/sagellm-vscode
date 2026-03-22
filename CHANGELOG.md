@@ -23,19 +23,13 @@
 - **Default system prompt** updated: model now introduces itself as "SageCoder, an expert AI coding assistant".
 
 ### Fixed
-- **Download path unification**: Model downloads from the extension now write to the workstation `models_dir` (`~/Downloads/sagellm-models/<ModelName>`) instead of `~/.cache/huggingface/hub`. This aligns the extension's download destination with `sagellm-workstation`, so downloaded models are immediately found by the workstation local-path scanner with no duplication.
-- **`setModel()` missing `await`**: `vscode.workspace.getConfiguration().update()` was called without `await`, meaning the setting could be lost if VS Code shut down before the promise resolved.
-- **Retry timer leak on deactivate**: `scheduleRetryConnect()` created `setTimeout` timers that were never cancelled when the extension was deactivated. Added `retryTimer` tracking and a dispose subscription to clear it on shutdown.
-- **Dead `gatewayProcess` variable**: `startGateway()` used a VS Code terminal, so `gatewayProcess: cp.ChildProcess` was never assigned — making `stopGateway()` a no-op. Replaced with `activeGatewayTerminal: vscode.Terminal` which is correctly assigned and disposed.
-- **Inline completion skips template literals**: `shouldSkip()` ignored backtick-quoted template literal strings when counting unbalanced quotes, causing completions to be incorrectly suppressed inside TypeScript/JavaScript template literals.
-- **`nativeCompletionsAvailable` not reset after gateway restart**: If the gateway reconnected (e.g. after a restart that added `/v1/completions` support), the inline provider kept the stale `false` value and never re-probed. `resetCache()` is now called on every successful gateway reconnect.
+- **Standalone chat panel restored**: The right-bottom or command-triggered `openChat` panel no longer reuses the sidebar webview view type. The standalone panel now uses its own panel-only `viewType`, which avoids host conflicts with the working sidebar chat view.
+- **Sidebar chat is now the primary conversation surface**: `SageLLM: Open Chat` now reveals the working sidebar chat instead of opening the fragile standalone panel, and the status-bar click opens the setup/configuration panel instead of the broken standalone chat window.
+- **Setup panel is now actionable**: The status-bar panel is no longer a README-style page. It now shows current gateway/model settings and exposes direct actions for checking connection, opening settings, configuring the server, selecting a model, opening sidebar chat, and viewing debug logs.
+- **Chat bootstrap flow hardened**: Sidebar and standalone chat now share a single TypeScript controller and a single HTML/script builder, and model-restore retries are cancelable and generation-scoped so later UI changes are less likely to break initialization.
 
-### Performance
-- **Memoize `candidatePythons()`**: The function previously scanned the entire `~/miniforge3/envs/` directory on every call; called twice per download attempt. Now cached for the lifetime of the extension host.
-- **Memoize `workstationModelDirs()`**: Previously re-read `config.ini` and iterated workspace folders on every call (invoked by `isModelDownloaded`, `localWorkstationModelPath`, `discoverWorkstationLocalModels`). Now cached and automatically invalidated via `onDidChangeWorkspaceFolders`.
-
-### Fixed (model selection)
-- **Model selection bypasses download step**: When a user selected a model from the "Available to download" list, the extension immediately offered to restart the gateway (which triggered `sagellm serve` and inline model pull with no progress UI). The flow now first asks to download via `huggingface-cli` (with VS Code progress notification, speed, and ETA), and only offers to restart the gateway after the download completes.
+### Added
+- **Debug output channel restored**: `SageLLM Debug` and `SageLLM: Open Debug Logs` are available again for extension-side tracing while we reintroduce features incrementally.
 
 ## [0.1.12] — 2026-03-05
 
