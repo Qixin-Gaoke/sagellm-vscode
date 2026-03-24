@@ -5,6 +5,14 @@
 
 Bring [SageLLM](https://github.com/intellistream/sagellm) inference power directly into VS Code — chat panel, inline code completion, and model management, all powered by your local or remote `sagellm-gateway`.
 
+## Code Organization
+
+- `src/extension.ts`: VS Code activation entrypoint.
+- feature modules in `src/`: panel, diagnostics, inline completion, gateway client, launcher, status bar, and workspace context logic should stay separated by responsibility.
+- `media/`: static UI assets for the extension.
+- `package.json`, `tsconfig.json`, and `esbuild.js`: manifest, TypeScript config, and build pipeline configuration.
+- packaged artifacts such as `.vsix` files are release outputs and should not become the source of truth for extension code.
+
 ## Features
 
 - **Chat Panel** — Conversational AI in a VS Code sidebar or split view

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- `README.md` 新增仓库级 `Code Organization` 说明，明确 VS Code 扩展中 `src/` 特性模块、`media/` 资源、构建配置文件与 `.vsix` 产物之间的边界，减少后续功能扩展时的文件落点歧义。
+
 ### Added
 - 新增开发者预览命令 `SageCoder: Run Migration Diagnostics`：会抓取 gateway `/info`、执行一次 chat streaming 诊断并导出包含 `trace_id`、`request_id`、`engine_id`、流式事件序列、异常终止信息与 `/v1/completions` 支持状态的 JSON 报告，便于 clean-room 迁移联调。
 
